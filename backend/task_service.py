@@ -127,6 +127,7 @@ def build_task_doc(
     checklist_items: Optional[List[str]] = None,
     schedule_item_id: Optional[str] = None,
     schedule_subtype: Optional[str] = None,
+    inventory_item_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     now = now_iso()
     checklist = [
@@ -165,6 +166,7 @@ def build_task_doc(
         "comments": [],
         "schedule_item_id": schedule_item_id or None,
         "schedule_subtype": schedule_subtype or None,
+        "inventory_item_id": inventory_item_id or None,
     }
 
 

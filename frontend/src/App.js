@@ -1,6 +1,6 @@
 import "@/App.css";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import { AuthProvider } from "@/context/AuthContext";
+import { AuthProvider, useAuth } from "@/context/AuthContext";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import Layout from "@/components/Layout";
 import Login from "@/pages/Login";
@@ -21,6 +21,7 @@ import Campaigns from "@/pages/Campaigns";
 import OffersSettings from "@/pages/OffersSettings";
 import Tasks from "@/pages/Tasks";
 import Compliance from "@/pages/Compliance";
+import Inventory from "@/pages/Inventory";
 
 function App() {
   return (
@@ -34,7 +35,7 @@ function App() {
             {/* Authenticated routes (any role) */}
             <Route element={<ProtectedRoute />}>
               <Route path="/" element={<Layout />}>
-                <Route index element={<AnalyticsDashboard />} />
+                <Route index element={<Home />} />
                 <Route path="reservations" element={<Reservations />} />
                 <Route path="import" element={<Import />} />
                 <Route path="properties" element={<Properties />} />
@@ -47,6 +48,7 @@ function App() {
                 <Route path="campaigns" element={<Campaigns />} />
                 <Route path="tasks" element={<Tasks />} />
                 <Route path="compliance" element={<Compliance />} />
+                <Route path="inventory" element={<Inventory />} />
 
                 {/* Admin-only nested routes */}
                 <Route element={<ProtectedRoute roles={["admin"]} />}>
@@ -67,3 +69,10 @@ function App() {
 }
 
 export default App;
+
+// Index landing — staff users go to /tasks because /dashboard is admin/manager only.
+function Home() {
+  const { user } = useAuth();
+  if (user?.role === "staff") return <Navigate to="/tasks" replace />;
+  return <AnalyticsDashboard />;
+}

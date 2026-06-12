@@ -1,0 +1,48 @@
+{
+  "summary": "Stage 6D inventory tracker + auth-hardening sweep + tasks-attention widget verified end-to-end against the public preview URL. Backend: 74/74 pytest tests PASS in /app/backend/tests/test_stage6d_inventory_and_auth.py covering (a) AUTH HARDENING - 18 protected GETs return 401 with no token, all 18 return 200 with admin token, manager gets 200 on operational reads/writes and 403 on /users, /settings/digest, /digest/preview, /digest/history, /settings/commissions PUT, /settings/offers POST, /settings/direct-target PUT; staff gets 200 on /properties (read), 403 on /properties POST, /analytics/summary, /segments, /inventory POST, /inventory/{id}/restock; staff /inventory GET returns 200 filtered to their property only. (b) Token-based webhook /api/digest/run POST does NOT require JWT (anonymous, returns 200/400/401/403 from token check, not from JWT dep). (c) Inventory: /api/inventory/meta returns 7 categories + 25 defaults; baseline GET /api/inventory returns 375 items (15 props × 25) with summary {total, by_status, by_category}; filters category=linens, property_id, status work; full CRUD (POST/PUT/DELETE) + restock (sets current_count, last_restocked_at=today, last_restocked_by_name=actor) + seed-defaults (inserted+skipped=25). (d) Auto-task creation: setting min=5, current=3 on a custom item → next admin GET auto-creates a restock task with category='restock', inventory_item_id=iid, priority='high' (when current=0 → 'urgent' verified separately); repeated GETs do NOT spawn duplicates (linked_task_id guard); PUT /api/tasks status=done snaps inventory back to target_count and clears linked_task_id; DELETE /api/tasks clears the inventory item's linked_task_id. Regression: 33/33 Stage 6B+6C tests still pass. Frontend Playwright: 401 interceptor redirects /properties → /login when sb_token cleared; admin login lands at /properties; dashboard widget tasks-attention-widget visible with all three cards (widget-overdue=5, widget-mine-open=0, widget-blocked=0) and correct hrefs (/tasks?overdue=1, /tasks?mine=1, /tasks?status=blocked). After fixing the missing useSearchParams import in Tasks.jsx, /tasks?status=blocked correctly opens the Blocked tab; /inventory page loads with inv-total=375, all 5 summary tiles (inv-ok, inv-below, inv-low, inv-out), all 5 filter testids, 375 restock buttons; restock interaction (inv-restock → inv-restock-input → inv-restock-submit) works and persists. Properties → editor → prop-toggle-inventory expands inventory-panel-{pid} with 25 default rows + inventory-add-custom button. Staff RBAC frontend: staff lands on /tasks (Home redirect), nav-dashboard hidden, nav-inventory shown, /inventory page shows only their 25 items with ZERO inv-restock buttons (isMgr=false correctly suppresses mgmt actions). One frontend bug found and fixed during this run (see action items / RCA).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Tasks.jsx", "issue": "FIXED during this run - `useSearchParams` was used on line 25 but never imported from react-router-dom. Caused 'ReferenceError: useSearchParams is not defined' uncaught runtime error overlay the moment any user navigated to /tasks (with or without query params). This broke ALL three widget cards (widget-overdue → /tasks?overdue=1, widget-mine-open → /tasks?mine=1, widget-blocked → /tasks?status=blocked) AND every direct visit to /tasks. Added `import { useSearchParams } from 'react-router-dom';` at the top of Tasks.jsx. Verified end-to-end after fix.", "selector": "react-router-dom useSearchParams", "priority": "CRITICAL"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/dashboard (AnalyticsDashboard)", "issues": ["Console fills with `recharts width(-1)/height(-1)` warnings before charts have measured their container. Not a regression, but worth addressing by giving the ResponsiveContainer a minHeight or rendering charts only after layout."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_stage6d_inventory_and_auth.py",
+    "/app/test_reports/pytest/stage6d_results.xml",
+    "/app/backend/tests/test_stage6b_tasks.py",
+    "/app/backend/tests/test_stage6c_schedules.py"
+  ],
+  "action_items": [
+    "(Already fixed by this agent) Add `import { useSearchParams } from 'react-router-dom';` to /app/frontend/src/pages/Tasks.jsx — please verify the fix landed in your local view; without it /tasks crashed with an uncaught runtime error overlay.",
+    "(Process) Two iterations in a row (6C had PropertySchedulePanel missing import; 6D had useSearchParams missing import) shipped with a missed import. Strongly recommend wiring `yarn lint` (eslint no-undef) into pre-commit or CI to catch this whole class of bug before testing.",
+    "(Nice-to-have) AnalyticsDashboard ResponsiveContainer recharts width(-1)/height(-1) warnings spam the console — give the chart wrapper a minHeight or delay-mount once layout stabilises."
+  ],
+  "critical_code_review_comments": [
+    "Auth dependency lists (AUTH_ANY / AUTH_MGR / AUTH_ADMIN) are consistently applied across server.py — verified 18 endpoints in one parametrised sweep. /api/digest/run is intentionally and correctly NOT in AUTH_* (token-based webhook).",
+    "inventory_service.py is pure-functional (build_item, status_for_item, needs_task, restock_patch, summarise) — easy to unit test. DEFAULTS list = 25 items across 7 categories, matches spec.",
+    "_auto_create_tasks_for_inventory uses linked_task_id as the dedupe guard — verified no duplicate task creation across repeated list calls. Priority correctly switches urgent (current=0) vs high (current<=min) — verified.",
+    "PUT /api/tasks status=done on a task carrying inventory_item_id triggers _maybe_bump_inventory_for_task which snaps current_count back to target_count, sets last_restocked_at/by_name, clears linked_task_id — verified.",
+    "DELETE /api/tasks correctly clears inventory_item_id linked_task_id via {id, linked_task_id: tid} filter — same guarded pattern as Stage 6C. Verified.",
+    "Inventory list auto-task creation runs on every admin/manager GET — same scaling caveat as Stage 6C schedules (will linearly grow with portfolio size). Fine for 15 props; consider TTL flag once portfolios scale.",
+    "STAFF RBAC: _inv_visibility correctly restricts to assigned_properties for staff. /api/inventory GET works for staff (200, filtered); /api/inventory POST/PUT/DELETE/restock all 403 for staff — verified. Frontend Inventory.jsx hides inv-restock-* buttons for staff via isMgr false branch.",
+    "Frontend: missing useSearchParams import in Tasks.jsx — second copy-paste regression in two iterations. CI/lint sweep is overdue."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_stage6d_inventory_and_auth.py (new — 74-test Stage 6D + auth hardening regression suite)",
+    "/app/frontend/src/pages/Tasks.jsx (bug fix: added missing `import { useSearchParams } from 'react-router-dom';`)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "admin@sourcebench.local / ChangeMe123! (from /app/memory/test_credentials.md). Manager + staff users created via /api/users with TEST_ prefix and deleted in fixture teardown / explicit cleanup.",
+  "seed_data_creation": "Created and cleaned up: 1 TEST manager + 2 TEST staff users (1 module-scope fixture + 1 ad-hoc for frontend RBAC test), ~5 custom inventory_items with TEST_ subtypes (low-stock auto-task / urgent-priority / delete-task permutations) + their auto-spawned restock tasks. All deleted via teardown / final cleanup. The 375 production inventory_items / 15 properties / 180 schedule items were NOT modified.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Stage 6D is solid after one frontend import fix. Backend regression: `pytest backend/tests/test_stage6d_inventory_and_auth.py -v` (74 tests, ~12s). The auto-task creation test sets the inventory item to active=False before deleting the task so the subsequent inventory list does not immediately re-link a brand new task (same gotcha as Stage 6C delete_task_clears_linked test). /api/digest/run uses POST (NOT GET) — 405 if GET. /api/properties returns {items: [...]}. /api/tasks may return either {items: [...]} or a bare list depending on path — both handled. The 375-item baseline depends on the 15-property seed remaining intact and inventory auto-seed having run at startup.",
+  "rca of the issue": "Frontend ReferenceError: useSearchParams is not defined — Tasks.jsx line 25 calls `useSearchParams()` but the import was never added (the file imports from `react` and `@/lib/api` only, never from `react-router-dom`). Repro: log in as any role → visit /tasks (or click any TasksAttentionWidget card) → red runtime overlay 'useSearchParams is not defined' covers the whole screen, Tasks page never renders. Mitigation: added `import { useSearchParams } from 'react-router-dom';` immediately under the React imports. Re-tested: /tasks, /tasks?overdue=1, /tasks?mine=1, /tasks?status=blocked all render correctly with proper status-tab and filter pre-selection. Widget → Tasks navigation round-trip now works."
+}

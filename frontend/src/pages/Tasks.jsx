@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import {
@@ -22,21 +23,23 @@ const STATUS_TABS = [
 export default function Tasks() {
   const { user } = useAuth();
   const isManagerPlus = user?.role === "admin" || user?.role === "manager";
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [items, setItems] = useState([]);
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [version, setVersion] = useState(0);
 
-  const [filters, setFilters] = useState({
-    status: "",
-    category: "",
-    priority: "",
-    property_id: "",
-    assignee_id: "",
-    mine: false,
+  const [filters, setFilters] = useState(() => ({
+    status: searchParams.get("status") || "",
+    category: searchParams.get("category") || "",
+    priority: searchParams.get("priority") || "",
+    property_id: searchParams.get("property_id") || "",
+    assignee_id: searchParams.get("assignee_id") || "",
+    mine: searchParams.get("mine") === "1",
+    overdue: searchParams.get("overdue") === "1",
     q: "",
-  });
+  }));
   const [properties, setProperties] = useState([]);
   const [users, setUsers] = useState([]);
   const [creating, setCreating] = useState(false);
@@ -77,19 +80,25 @@ export default function Tasks() {
   }, [version, filters.status, filters.category, filters.priority, filters.property_id, filters.assignee_id, filters.mine]);
 
   const filtered = useMemo(() => {
-    if (!filters.q.trim()) return items;
+    let list = items;
+    if (filters.overdue) {
+      const today = new Date().toISOString().slice(0, 10);
+      list = list.filter((t) => t.due_date && t.due_date < today && t.status !== "done");
+    }
+    if (!filters.q.trim()) return list;
     const q = filters.q.toLowerCase();
-    return items.filter((t) =>
+    return list.filter((t) =>
       (t.title || "").toLowerCase().includes(q) ||
       (t.description || "").toLowerCase().includes(q) ||
       (t.property_name || "").toLowerCase().includes(q) ||
       (t.assignee_name || "").toLowerCase().includes(q)
     );
-  }, [items, filters.q]);
+  }, [items, filters.q, filters.overdue]);
 
-  const clearFilters = () => setFilters({
-    status: "", category: "", priority: "", property_id: "", assignee_id: "", mine: false, q: "",
-  });
+  const clearFilters = () => {
+    setFilters({ status: "", category: "", priority: "", property_id: "", assignee_id: "", mine: false, overdue: false, q: "" });
+    setSearchParams({});
+  };
 
   const onCreated = (t) => {
     setCreating(false);

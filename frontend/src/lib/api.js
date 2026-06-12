@@ -8,6 +8,26 @@ export const api = axios.create({
   headers: { "Content-Type": "application/json" },
 });
 
+// 401 → redirect to /login (unless we're already on /login).
+// Avoids login page being kicked out for the explicit /auth/login 401.
+api.interceptors.response.use(
+  (r) => r,
+  (err) => {
+    const status = err?.response?.status;
+    const url = err?.config?.url || "";
+    if (status === 401 && !url.includes("/auth/login")) {
+      try {
+        localStorage.removeItem("sb_token");
+        delete api.defaults.headers.common["Authorization"];
+      } catch (e) { /* ignore */ }
+      if (typeof window !== "undefined" && window.location.pathname !== "/login") {
+        window.location.assign("/login");
+      }
+    }
+    return Promise.reject(err);
+  },
+);
+
 export const SOURCE_COLORS = {
   Airbnb: "#FF5A5F",
   "Booking.com": "#003580",

@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/select";
 import { Trash2, Plus, Building2, Pencil, Save, X, ChevronDown, ChevronRight } from "lucide-react";
 import PropertySchedulePanel from "@/components/PropertySchedulePanel";
+import PropertyInventoryPanel from "@/components/PropertyInventoryPanel";
 
 const TYPES = ["Apartment", "House", "Townhouse", "Studio", "Villa", "Cabin", "Other"];
 
@@ -279,6 +280,7 @@ function PropertyEditor({ draft, setDraft, users, propertyId, onSave, onCancel, 
   const [showAccess, setShowAccess] = useState(mode === "edit");
   const [showListings, setShowListings] = useState(false);
   const [showSchedule, setShowSchedule] = useState(false);
+  const [showInventory, setShowInventory] = useState(false);
   return (
     <div className="surface rounded-md p-5 space-y-3" data-testid={`property-editor-${mode}`}>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -570,6 +572,25 @@ function PropertyEditor({ draft, setDraft, users, propertyId, onSave, onCancel, 
           {showSchedule && (
             <div className="mt-3">
               <PropertySchedulePanel propertyId={propertyId} />
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Inventory */}
+      {mode === "edit" && propertyId && (
+        <div className="border-t divider pt-3">
+          <button
+            onClick={() => setShowInventory((s) => !s)}
+            data-testid="prop-toggle-inventory"
+            className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-[0.18em] text-dim hover:text-white"
+          >
+            {showInventory ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+            Inventory
+          </button>
+          {showInventory && (
+            <div className="mt-3">
+              <PropertyInventoryPanel propertyId={propertyId} />
             </div>
           )}
         </div>

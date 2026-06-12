@@ -94,6 +94,18 @@ from compliance_service import (
     status_for_item, bump_after_completion, needs_task, task_priority_for,
     summarise as schedule_summarise,
 )
+from inventory_service import (
+    CATEGORIES as INV_CATEGORIES,
+    CATEGORY_LABELS as INV_CATEGORY_LABELS,
+    DEFAULTS as INV_DEFAULTS,
+    build_item as build_inventory_item,
+    default_items_for_property as default_inventory_for_property,
+    status_for_item as inv_status,
+    needs_task as inv_needs_task,
+    task_priority as inv_task_priority,
+    restock_patch as inv_restock_patch,
+    summarise as inv_summarise,
+)
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -104,6 +116,13 @@ db = client[os.environ["DB_NAME"]]
 
 app = FastAPI(title="STR Booking Analytics API")
 api = APIRouter(prefix="/api")
+
+# Auth dependencies — defined early so route decorators can reference them in
+# their `dependencies=[]` clauses (FastAPI evaluates that at import time).
+current_user_dep, require_role_dep = make_auth_deps(db)
+AUTH_ANY = [Depends(current_user_dep)]
+AUTH_MGR = [Depends(require_role_dep("admin", "manager"))]
+AUTH_ADMIN = [Depends(require_role_dep("admin"))]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -461,12 +480,12 @@ async def root():
     return {"name": "STR Booking Analytics API", "status": "ok"}
 
 
-@api.get("/sources")
+@api.get("/sources", dependencies=AUTH_ANY)
 async def list_sources():
     return {"sources": SOURCE_CATEGORIES}
 
 
-@api.post("/import/preview")
+@api.post("/import/preview", dependencies=AUTH_MGR)
 async def import_preview(file: UploadFile = File(...)):
     """Parse uploaded CSV; return all normalised rows + column mapping + validation."""
     if not file.filename.lower().endswith(".csv"):
@@ -511,7 +530,7 @@ async def import_preview(file: UploadFile = File(...)):
     }
 
 
-@api.post("/import/confirm")
+@api.post("/import/confirm", dependencies=AUTH_MGR)
 async def import_confirm(payload: ConfirmImportPayload):
     if not payload.rows:
         raise HTTPException(status_code=400, detail="No rows to import")
@@ -579,7 +598,7 @@ async def import_confirm(payload: ConfirmImportPayload):
     return _strip_id(log)
 
 
-@api.get("/reservations")
+@api.get("/reservations", dependencies=AUTH_MGR)
 async def list_reservations(
     source: Optional[str] = None,
     property_name: Optional[str] = None,
@@ -595,7 +614,7 @@ async def list_reservations(
     return {"items": items, "count": len(items)}
 
 
-@api.patch("/reservations/{rid}/source")
+@api.patch("/reservations/{rid}/source", dependencies=AUTH_MGR)
 async def override_source(rid: str, payload: SourceOverridePayload):
     if payload.classified_source not in SOURCE_CATEGORIES:
         raise HTTPException(status_code=400, detail="Invalid source category")
@@ -615,14 +634,14 @@ async def override_source(rid: str, payload: SourceOverridePayload):
     return doc
 
 
-@api.get("/imports")
+@api.get("/imports", dependencies=AUTH_MGR)
 async def list_imports():
     cursor = db.import_logs.find({}, {"_id": 0}).sort("imported_at", -1).limit(200)
     items = await cursor.to_list(length=200)
     return {"items": items}
 
 
-@api.get("/analytics/summary")
+@api.get("/analytics/summary", dependencies=AUTH_MGR)
 async def analytics_summary():
     pipeline_by_source = [
         {"$group": {
@@ -666,14 +685,14 @@ async def analytics_summary():
 
 # --- Properties --------------------------------------------------------------
 
-@api.get("/properties")
+@api.get("/properties", dependencies=AUTH_ANY)
 async def list_properties():
     cursor = db.properties.find({}, {"_id": 0}).sort("name", 1)
     items = await cursor.to_list(length=500)
     return {"items": items}
 
 
-@api.post("/properties")
+@api.post("/properties", dependencies=AUTH_MGR)
 async def create_property(payload: PropertyCreate):
     name = payload.name.strip()
     if not name:
@@ -712,7 +731,7 @@ async def create_property(payload: PropertyCreate):
     return _strip_id(doc)
 
 
-@api.put("/properties/{pid}")
+@api.put("/properties/{pid}", dependencies=AUTH_MGR)
 async def update_property(pid: str, payload: PropertyUpdate):
     existing = await db.properties.find_one({"id": pid})
     if not existing:
@@ -729,7 +748,7 @@ async def update_property(pid: str, payload: PropertyUpdate):
     return doc
 
 
-@api.delete("/properties/{pid}")
+@api.delete("/properties/{pid}", dependencies=AUTH_ADMIN)
 async def delete_property(pid: str):
     res = await db.properties.delete_one({"id": pid})
     if res.deleted_count == 0:
@@ -747,13 +766,13 @@ async def _guests_by_email() -> Dict[str, Dict[str, Any]]:
     return {g["email"]: g for g in items}
 
 
-@api.post("/guests/recompute")
+@api.post("/guests/recompute", dependencies=AUTH_MGR)
 async def recompute_guests():
     result = await recompute_all_guests(db)
     return result
 
 
-@api.get("/guests")
+@api.get("/guests", dependencies=AUTH_MGR)
 async def list_guests(
     segment: Optional[str] = None,
     search: Optional[str] = None,
@@ -775,7 +794,7 @@ async def list_guests(
     return {"items": items, "count": len(items)}
 
 
-@api.get("/guests/{guest_id}")
+@api.get("/guests/{guest_id}", dependencies=AUTH_MGR)
 async def get_guest(guest_id: str):
     # guest_id is the lowercase email
     em = guest_id.lower().strip()
@@ -800,7 +819,7 @@ async def get_guest(guest_id: str):
     }
 
 
-@api.get("/segments")
+@api.get("/segments", dependencies=AUTH_MGR)
 async def list_segments():
     """Definitions + counts for every segment."""
     defs = list_segment_definitions()
@@ -819,7 +838,7 @@ async def list_segments():
     }
 
 
-@api.get("/cancellations/summary")
+@api.get("/cancellations/summary", dependencies=AUTH_MGR)
 async def cancellations_summary():
     res_cursor = db.reservations.find({}, {"_id": 0})
     reservations = await res_cursor.to_list(length=100000)
@@ -827,7 +846,7 @@ async def cancellations_summary():
     return build_cancellation_summary(reservations, guests_map)
 
 
-@api.get("/cancellations")
+@api.get("/cancellations", dependencies=AUTH_MGR)
 async def cancellations_list(
     segment: Optional[str] = None,
     source: Optional[str] = None,
@@ -840,7 +859,7 @@ async def cancellations_list(
     return {"items": rows, "count": len(rows)}
 
 
-@api.get("/cancellations/export.csv", response_class=PlainTextResponse)
+@api.get("/cancellations/export.csv", response_class=PlainTextResponse, dependencies=AUTH_MGR)
 async def cancellations_export(
     segment: Optional[str] = None,
     source: Optional[str] = None,
@@ -874,12 +893,12 @@ def _score_color_band(score: int) -> str:
     return "red"
 
 
-@api.post("/scores/recalculate")
+@api.post("/scores/recalculate", dependencies=AUTH_MGR)
 async def scores_recalculate():
     return await recalculate_all_scores(db)
 
 
-@api.get("/scores/summary")
+@api.get("/scores/summary", dependencies=AUTH_MGR)
 async def scores_summary():
     g_cursor = db.guests.find({}, {"_id": 0})
     guests = await g_cursor.to_list(length=100000)
@@ -916,7 +935,7 @@ async def scores_summary():
     }
 
 
-@api.get("/scores/guests")
+@api.get("/scores/guests", dependencies=AUTH_MGR)
 async def scores_list(
     primary_source: Optional[str] = None,
     min_score: int = 0,
@@ -935,7 +954,7 @@ async def scores_list(
     return {"items": items, "count": len(items)}
 
 
-@api.get("/scores/guests/export.csv", response_class=PlainTextResponse)
+@api.get("/scores/guests/export.csv", response_class=PlainTextResponse, dependencies=AUTH_MGR)
 async def scores_export(
     primary_source: Optional[str] = None,
     min_score: int = 0,
@@ -981,7 +1000,7 @@ async def scores_export(
     )
 
 
-@api.get("/commissions/summary")
+@api.get("/commissions/summary", dependencies=AUTH_MGR)
 async def commissions_summary():
     res_cursor = db.reservations.find({}, {"_id": 0})
     reservations = await res_cursor.to_list(length=200000)
@@ -997,13 +1016,13 @@ async def commissions_summary():
     }
 
 
-@api.get("/settings/commissions")
+@api.get("/settings/commissions", dependencies=AUTH_MGR)
 async def settings_commissions_get():
     rates = await get_commission_rates(db)
     return {"rates": rates, "defaults": DEFAULT_COMMISSION_RATES}
 
 
-@api.put("/settings/commissions")
+@api.put("/settings/commissions", dependencies=AUTH_ADMIN)
 async def settings_commissions_put(payload: CommissionRatesPayload):
     if not payload.rates:
         raise HTTPException(status_code=400, detail="rates is required")
@@ -1027,7 +1046,7 @@ async def _load_all_guests() -> List[Dict[str, Any]]:
     return await cursor.to_list(length=100000)
 
 
-@api.get("/analytics/revenue")
+@api.get("/analytics/revenue", dependencies=AUTH_MGR)
 async def analytics_revenue(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -1044,7 +1063,7 @@ async def analytics_revenue(
     }
 
 
-@api.get("/analytics/bookings")
+@api.get("/analytics/bookings", dependencies=AUTH_MGR)
 async def analytics_bookings(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -1057,7 +1076,7 @@ async def analytics_bookings(
     return booking_metrics(scoped)
 
 
-@api.get("/analytics/guests")
+@api.get("/analytics/guests", dependencies=AUTH_MGR)
 async def analytics_guests(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -1071,7 +1090,7 @@ async def analytics_guests(
     return guest_metrics(scoped, guests, start, end)
 
 
-@api.get("/analytics/conversion")
+@api.get("/analytics/conversion", dependencies=AUTH_MGR)
 async def analytics_conversion(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -1086,7 +1105,7 @@ async def analytics_conversion(
     return conversion_metrics(scoped, guests, res, rates)
 
 
-@api.get("/analytics/clv")
+@api.get("/analytics/clv", dependencies=AUTH_MGR)
 async def analytics_clv(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -1156,12 +1175,12 @@ REPORT_DEFS = {
 }
 
 
-@api.get("/reports")
+@api.get("/reports", dependencies=AUTH_MGR)
 async def reports_index():
     return {"reports": [{"key": k, **v} for k, v in REPORT_DEFS.items()]}
 
 
-@api.get("/reports/{report_name}/count")
+@api.get("/reports/{report_name}/count", dependencies=AUTH_MGR)
 async def reports_count(
     report_name: str,
     start_date: Optional[str] = None,
@@ -1173,7 +1192,7 @@ async def reports_count(
     return {"count": len(rows)}
 
 
-@api.get("/reports/{report_name}.csv", response_class=PlainTextResponse)
+@api.get("/reports/{report_name}.csv", response_class=PlainTextResponse, dependencies=AUTH_MGR)
 async def reports_csv(
     report_name: str,
     start_date: Optional[str] = None,
@@ -1273,7 +1292,7 @@ def _dashboard_base() -> str:
     return os.environ.get("DASHBOARD_BASE", "").rstrip("/") or "https://example.com"
 
 
-@api.get("/settings/digest")
+@api.get("/settings/digest", dependencies=AUTH_ADMIN)
 async def settings_digest_get():
     cfg = await ensure_digest_settings(db)
     webhook_url = f"{_dashboard_base()}/api/digest/run?token={cfg.get('webhook_token','')}"
@@ -1285,21 +1304,21 @@ async def settings_digest_get():
     }
 
 
-@api.put("/settings/digest")
+@api.put("/settings/digest", dependencies=AUTH_ADMIN)
 async def settings_digest_put(payload: DigestSettingsPayload):
     patch = {k: v for k, v in payload.model_dump().items() if v is not None}
     cfg = await update_digest_settings(db, patch)
     return {k: v for k, v in cfg.items() if k != "_id"}
 
 
-@api.post("/settings/digest/rotate-token")
+@api.post("/settings/digest/rotate-token", dependencies=AUTH_ADMIN)
 async def settings_digest_rotate():
     token = await rotate_webhook_token(db)
     webhook_url = f"{_dashboard_base()}/api/digest/run?token={token}"
     return {"webhook_token": token, "webhook_url": webhook_url}
 
 
-@api.get("/digest/preview")
+@api.get("/digest/preview", dependencies=AUTH_ADMIN)
 async def digest_preview():
     return await preview_digest(db, _dashboard_base())
 
@@ -1309,7 +1328,7 @@ class DigestRunPayload(BaseModel):
     test_recipient: Optional[str] = None
 
 
-@api.post("/digest/send-now")
+@api.post("/digest/send-now", dependencies=AUTH_ADMIN)
 async def digest_send_now(payload: DigestRunPayload):
     """Manual trigger from the UI. Always force-sends; ignores 'no new data' guard."""
     return await run_digest(
@@ -1333,7 +1352,7 @@ async def digest_webhook_run(token: str = Query(...)):
     return PlainTextResponse(content=f"{status}: {detail}\n")
 
 
-@api.get("/digest/history")
+@api.get("/digest/history", dependencies=AUTH_ADMIN)
 async def digest_history():
     items = await list_digest_log(db, limit=30)
     return {"items": items}
@@ -1367,7 +1386,7 @@ class ContentPayload(BaseModel):
     send_timing: str
 
 
-@api.get("/campaigns")
+@api.get("/campaigns", dependencies=AUTH_MGR)
 async def campaigns_list():
     briefs = await list_campaign_briefs(db)
     grouped: Dict[str, List[Dict[str, Any]]] = {t: [] for t in TABS}
@@ -1376,12 +1395,12 @@ async def campaigns_list():
     return {"tabs": TABS, "briefs": briefs, "grouped": grouped}
 
 
-@api.get("/campaigns/growth-tracker")
+@api.get("/campaigns/growth-tracker", dependencies=AUTH_MGR)
 async def campaigns_growth_tracker():
     return await growth_tracker(db)
 
 
-@api.get("/campaigns/{key}/guests")
+@api.get("/campaigns/{key}/guests", dependencies=AUTH_MGR)
 async def campaigns_guests(key: str, limit: int = Query(2000, le=10000)):
     if key not in AUDIENCES:
         raise HTTPException(status_code=404, detail="Unknown audience")
@@ -1391,7 +1410,7 @@ async def campaigns_guests(key: str, limit: int = Query(2000, le=10000)):
     return {"key": key, "count": len(audience), "items": audience[:limit]}
 
 
-@api.get("/campaigns/{key}/export.csv", response_class=PlainTextResponse)
+@api.get("/campaigns/{key}/export.csv", response_class=PlainTextResponse, dependencies=AUTH_MGR)
 async def campaigns_export(key: str):
     if key not in AUDIENCES:
         raise HTTPException(status_code=404, detail="Unknown audience")
@@ -1403,19 +1422,19 @@ async def campaigns_export(key: str):
     return _csv_response(rows, CSV_FIELDS, filename)
 
 
-@api.put("/settings/direct-target")
+@api.put("/settings/direct-target", dependencies=AUTH_ADMIN)
 async def settings_direct_target_put(payload: TargetPayload):
     v = await set_target_pct(db, payload.target_direct_pct)
     return {"target_direct_pct": v}
 
 
-@api.get("/settings/offers")
+@api.get("/settings/offers", dependencies=AUTH_MGR)
 async def settings_offers_get():
     offers = await get_offers(db)
     return {"offers": offers}
 
 
-@api.post("/settings/offers")
+@api.post("/settings/offers", dependencies=AUTH_ADMIN)
 async def settings_offers_post(payload: OfferPayload):
     try:
         offers = await upsert_offer(db, payload.model_dump())
@@ -1424,7 +1443,7 @@ async def settings_offers_post(payload: OfferPayload):
     return {"offers": offers}
 
 
-@api.put("/settings/offers/{code}")
+@api.put("/settings/offers/{code}", dependencies=AUTH_ADMIN)
 async def settings_offers_put(code: str, payload: OfferPayload):
     payload.code = code
     try:
@@ -1434,13 +1453,13 @@ async def settings_offers_put(code: str, payload: OfferPayload):
     return {"offers": offers}
 
 
-@api.delete("/settings/offers/{code}")
+@api.delete("/settings/offers/{code}", dependencies=AUTH_ADMIN)
 async def settings_offers_delete(code: str):
     offers = await delete_offer(db, code)
     return {"offers": offers}
 
 
-@api.get("/settings/campaign-content/{key}")
+@api.get("/settings/campaign-content/{key}", dependencies=AUTH_MGR)
 async def settings_campaign_content_get(key: str):
     if key not in AUDIENCES:
         raise HTTPException(status_code=404, detail="Unknown audience")
@@ -1448,7 +1467,7 @@ async def settings_campaign_content_get(key: str):
     return {"key": key, "content": content.get(key)}
 
 
-@api.put("/settings/campaign-content/{key}")
+@api.put("/settings/campaign-content/{key}", dependencies=AUTH_ADMIN)
 async def settings_campaign_content_put(key: str, payload: ContentPayload):
     if key not in AUDIENCES:
         raise HTTPException(status_code=404, detail="Unknown audience")
@@ -1487,20 +1506,22 @@ async def startup_seed():
         await db.schedule_items.create_index("property_id")
         await db.schedule_items.create_index([("kind", 1), ("subtype", 1)])
         await db.schedule_items.create_index("next_due_at")
+        await db.inventory_items.create_index("property_id")
+        await db.inventory_items.create_index([("category", 1), ("subtype", 1)])
         # Auto-seed default schedule items onto any property that doesn't have any yet.
         async for prop in db.properties.find({}, {"_id": 0, "id": 1, "name": 1}):
             exists = await db.schedule_items.find_one({"property_id": prop["id"]}, {"_id": 1})
-            if exists:
-                continue
-            items = default_items_for_property(prop["id"], prop.get("name", ""))
-            if items:
-                await db.schedule_items.insert_many([it.copy() for it in items])
+            if not exists:
+                items = default_items_for_property(prop["id"], prop.get("name", ""))
+                if items:
+                    await db.schedule_items.insert_many([it.copy() for it in items])
+            inv_exists = await db.inventory_items.find_one({"property_id": prop["id"]}, {"_id": 1})
+            if not inv_exists:
+                inv_items = default_inventory_for_property(prop["id"], prop.get("name", ""))
+                if inv_items:
+                    await db.inventory_items.insert_many([it.copy() for it in inv_items])
     except Exception as e:
         logger.exception("startup seed failed: %s", e)
-
-
-# Build auth dependencies bound to this db
-current_user_dep, require_role_dep = make_auth_deps(db)
 
 
 # --- Stage 6A — Auth + users ------------------------------------------------
@@ -1661,6 +1682,7 @@ class TaskCreate(BaseModel):
     checklist: Optional[List[str]] = None
     schedule_item_id: Optional[str] = None
     schedule_subtype: Optional[str] = None
+    inventory_item_id: Optional[str] = None
 
 
 class TaskUpdate(BaseModel):
@@ -1674,6 +1696,7 @@ class TaskUpdate(BaseModel):
     assignee_id: Optional[str] = None
     schedule_item_id: Optional[str] = None
     schedule_subtype: Optional[str] = None
+    inventory_item_id: Optional[str] = None
 
 
 class PhotoCreate(BaseModel):
@@ -1808,12 +1831,18 @@ async def tasks_create(
         checklist_items=payload.checklist or [],
         schedule_item_id=payload.schedule_item_id,
         schedule_subtype=payload.schedule_subtype,
+        inventory_item_id=payload.inventory_item_id,
     )
     await db.tasks.insert_one(doc.copy())
     # Mirror the linkage onto the schedule item (so the UI can show "open task" badge)
     if payload.schedule_item_id:
         await db.schedule_items.update_one(
             {"id": payload.schedule_item_id},
+            {"$set": {"linked_task_id": doc["id"], "updated_at": task_now_iso()}},
+        )
+    if payload.inventory_item_id:
+        await db.inventory_items.update_one(
+            {"id": payload.inventory_item_id},
             {"$set": {"linked_task_id": doc["id"], "updated_at": task_now_iso()}},
         )
     doc.pop("_id", None)
@@ -1883,6 +1912,8 @@ async def tasks_update(
         patch["schedule_item_id"] = data["schedule_item_id"] or None
     if "schedule_subtype" in data:
         patch["schedule_subtype"] = data["schedule_subtype"] or None
+    if "inventory_item_id" in data:
+        patch["inventory_item_id"] = data["inventory_item_id"] or None
 
     patch["updated_at"] = task_now_iso()
     await db.tasks.update_one({"id": tid}, {"$set": patch})
@@ -1890,6 +1921,7 @@ async def tasks_update(
     # If status flipped to 'done', try to bump a linked schedule item.
     if patch.get("status") == "done":
         await _maybe_bump_schedule_for_task(task, patch, user)
+        await _maybe_bump_inventory_for_task(task, patch, user)
 
     doc = await db.tasks.find_one({"id": tid}, {"_id": 0})
     return doc
@@ -1923,18 +1955,40 @@ async def _maybe_bump_schedule_for_task(
     await db.schedule_items.update_one({"id": item["id"]}, {"$set": set_patch})
 
 
+async def _maybe_bump_inventory_for_task(
+    prev_task: Dict[str, Any],
+    patch: Dict[str, Any],
+    actor: Dict[str, Any],
+) -> None:
+    """Restock the inventory item linked to this task — bumps current_count back to target."""
+    iid = prev_task.get("inventory_item_id")
+    if not iid:
+        return
+    item = await db.inventory_items.find_one({"id": iid}, {"_id": 0})
+    if not item:
+        return
+    actor_name = actor.get("name") or actor.get("email", "")
+    set_patch = inv_restock_patch(item, item.get("target_count") or item.get("current_count") or 0, actor_name)
+    await db.inventory_items.update_one({"id": iid}, {"$set": set_patch})
+
+
 @api.delete("/tasks/{tid}")
 async def tasks_delete(
     tid: str,
     _: Dict[str, Any] = Depends(require_role_dep("admin", "manager")),
 ):
-    task = await db.tasks.find_one({"id": tid}, {"_id": 0, "schedule_item_id": 1})
+    task = await db.tasks.find_one({"id": tid}, {"_id": 0, "schedule_item_id": 1, "inventory_item_id": 1})
     res = await db.tasks.delete_one({"id": tid})
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Not found")
     if task and task.get("schedule_item_id"):
         await db.schedule_items.update_one(
             {"id": task["schedule_item_id"], "linked_task_id": tid},
+            {"$set": {"linked_task_id": None, "updated_at": task_now_iso()}},
+        )
+    if task and task.get("inventory_item_id"):
+        await db.inventory_items.update_one(
+            {"id": task["inventory_item_id"], "linked_task_id": tid},
             {"$set": {"linked_task_id": None, "updated_at": task_now_iso()}},
         )
     return {"deleted": True}
@@ -2316,6 +2370,233 @@ async def schedules_seed_defaults(
     to_insert = [it for it in items if (it["kind"], it["subtype"]) not in existing_keys]
     if to_insert:
         await db.schedule_items.insert_many([it.copy() for it in to_insert])
+    return {"inserted": len(to_insert), "skipped": len(items) - len(to_insert)}
+
+
+# --- Stage 6D — Apartment inventory tracker ---------------------------------
+
+class InventoryItemCreate(BaseModel):
+    property_id: str
+    category: str
+    subtype: str
+    label: str
+    unit: Optional[str] = "each"
+    min_threshold: int
+    target_count: int
+    current_count: Optional[int] = None
+    notes: Optional[str] = ""
+
+
+class InventoryItemUpdate(BaseModel):
+    label: Optional[str] = None
+    unit: Optional[str] = None
+    min_threshold: Optional[int] = None
+    target_count: Optional[int] = None
+    current_count: Optional[int] = None
+    notes: Optional[str] = None
+    active: Optional[bool] = None
+
+
+class InventoryRestockPayload(BaseModel):
+    new_count: int
+
+
+def _inv_visibility(user: Dict[str, Any]) -> Dict[str, Any]:
+    if user.get("role") in ("admin", "manager"):
+        return {}
+    return {"property_id": {"$in": user.get("assigned_properties") or ["__none__"]}}
+
+
+async def _auto_create_tasks_for_inventory(actor: Dict[str, Any]) -> int:
+    cursor = db.inventory_items.find(
+        {"active": True, "linked_task_id": None},
+        {"_id": 0},
+    )
+    items = await cursor.to_list(length=5000)
+    created = 0
+    for item in items:
+        if not inv_needs_task(item):
+            continue
+        prop = await db.properties.find_one({"id": item["property_id"]}, {"_id": 0})
+        if not prop:
+            continue
+        assignee_id = prop.get("cleaner_user_id") or prop.get("manager_user_id")
+        assignee_name = ""
+        if assignee_id:
+            u = await db.users.find_one({"id": assignee_id, "active": True}, {"_id": 0, "name": 1, "email": 1})
+            if u:
+                assignee_name = u.get("name") or u.get("email", "")
+            else:
+                assignee_id = None
+        current = int(item.get("current_count") or 0)
+        target = int(item.get("target_count") or 0)
+        title = f"Restock {item['label']} — {item.get('property_name') or prop.get('name', '')}"
+        desc_lines = [f"{item['label']}: {current} / target {target} {item.get('unit') or ''}".strip(),
+                      f"Min threshold: {item.get('min_threshold')}"]
+        if item.get("notes"):
+            desc_lines.append(item["notes"])
+        desc_lines.append("Auto-generated from inventory tracker.")
+        doc = build_task_doc(
+            title=title,
+            description="\n".join(desc_lines),
+            category="restock",
+            priority=inv_task_priority(item),
+            status="open",
+            due_date=None,
+            property_id=item["property_id"],
+            property_name=item.get("property_name") or prop.get("name", ""),
+            assignee_id=assignee_id,
+            assignee_name=assignee_name,
+            created_by=actor["id"],
+            created_by_name=actor.get("name") or actor.get("email", "system"),
+            inventory_item_id=item["id"],
+        )
+        await db.tasks.insert_one(doc.copy())
+        await db.inventory_items.update_one(
+            {"id": item["id"]},
+            {"$set": {"linked_task_id": doc["id"], "updated_at": task_now_iso()}},
+        )
+        created += 1
+    return created
+
+
+@api.get("/inventory/meta", dependencies=AUTH_ANY)
+async def inventory_meta():
+    return {
+        "categories": [{"key": k, "label": INV_CATEGORY_LABELS[k]} for k in INV_CATEGORIES],
+        "defaults": INV_DEFAULTS,
+    }
+
+
+@api.get("/inventory")
+async def inventory_list(
+    property_id: Optional[str] = None,
+    category: Optional[str] = None,
+    status: Optional[str] = None,
+    user: Dict[str, Any] = Depends(current_user_dep),
+):
+    # Auto-create restock tasks on admin/manager list.
+    if user.get("role") in ("admin", "manager"):
+        await _auto_create_tasks_for_inventory(user)
+
+    q = _inv_visibility(user)
+    if property_id:
+        q["property_id"] = property_id
+    if category:
+        q["category"] = category
+    cursor = db.inventory_items.find(q, {"_id": 0}).sort([("category", 1), ("label", 1)])
+    items = await cursor.to_list(length=10000)
+    enriched = []
+    for it in items:
+        s = inv_status(it)
+        if status and s != status:
+            continue
+        it["status"] = s
+        enriched.append(it)
+    return {"items": enriched, "summary": inv_summarise(items)}
+
+
+@api.post("/inventory", dependencies=AUTH_MGR)
+async def inventory_create(payload: InventoryItemCreate):
+    prop = await db.properties.find_one({"id": payload.property_id}, {"_id": 0, "id": 1, "name": 1})
+    if not prop:
+        raise HTTPException(status_code=400, detail="Unknown property")
+    if payload.category not in INV_CATEGORIES:
+        raise HTTPException(status_code=400, detail="Invalid category")
+    if payload.min_threshold < 0 or payload.target_count < 0:
+        raise HTTPException(status_code=400, detail="Counts must be non-negative")
+    item = build_inventory_item(
+        property_id=prop["id"], property_name=prop.get("name", ""),
+        category=payload.category, subtype=payload.subtype.strip(),
+        label=payload.label.strip(), unit=payload.unit or "each",
+        min_threshold=payload.min_threshold, target_count=payload.target_count,
+        current_count=payload.current_count, notes=payload.notes or "",
+    )
+    await db.inventory_items.insert_one(item.copy())
+    item.pop("_id", None)
+    item["status"] = inv_status(item)
+    return item
+
+
+@api.put("/inventory/{iid}", dependencies=AUTH_MGR)
+async def inventory_update(iid: str, payload: InventoryItemUpdate):
+    item = await db.inventory_items.find_one({"id": iid}, {"_id": 0})
+    if not item:
+        raise HTTPException(status_code=404, detail="Not found")
+    data = payload.model_dump(exclude_unset=True)
+    patch: Dict[str, Any] = {}
+    if "label" in data and data["label"]:
+        patch["label"] = data["label"].strip()
+    if "unit" in data and data["unit"]:
+        patch["unit"] = data["unit"].strip()
+    for k in ("min_threshold", "target_count", "current_count"):
+        if k in data and data[k] is not None:
+            if int(data[k]) < 0:
+                raise HTTPException(status_code=400, detail=f"{k} must be non-negative")
+            patch[k] = int(data[k])
+    if "notes" in data:
+        patch["notes"] = (data["notes"] or "").strip()
+    if "active" in data and data["active"] is not None:
+        patch["active"] = bool(data["active"])
+    patch["updated_at"] = task_now_iso()
+    await db.inventory_items.update_one({"id": iid}, {"$set": patch})
+    doc = await db.inventory_items.find_one({"id": iid}, {"_id": 0})
+    doc["status"] = inv_status(doc)
+    return doc
+
+
+@api.delete("/inventory/{iid}", dependencies=AUTH_MGR)
+async def inventory_delete(iid: str):
+    res = await db.inventory_items.delete_one({"id": iid})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"deleted": True}
+
+
+@api.post("/inventory/{iid}/restock", dependencies=AUTH_MGR)
+async def inventory_restock(
+    iid: str,
+    payload: InventoryRestockPayload,
+    actor: Dict[str, Any] = Depends(require_role_dep("admin", "manager")),
+):
+    item = await db.inventory_items.find_one({"id": iid}, {"_id": 0})
+    if not item:
+        raise HTTPException(status_code=404, detail="Not found")
+    if payload.new_count < 0:
+        raise HTTPException(status_code=400, detail="new_count must be non-negative")
+    actor_name = actor.get("name") or actor.get("email", "")
+    # Close any linked open task as 'done' (mark restock complete).
+    if item.get("linked_task_id"):
+        await db.tasks.update_one(
+            {"id": item["linked_task_id"]},
+            {"$set": {
+                "status": "done",
+                "completed_at": task_now_iso(),
+                "completed_by": actor["id"],
+                "completed_by_name": actor_name,
+                "updated_at": task_now_iso(),
+            }},
+        )
+    set_patch = inv_restock_patch(item, payload.new_count, actor_name)
+    await db.inventory_items.update_one({"id": iid}, {"$set": set_patch})
+    doc = await db.inventory_items.find_one({"id": iid}, {"_id": 0})
+    doc["status"] = inv_status(doc)
+    return doc
+
+
+@api.post("/inventory/seed-defaults", dependencies=AUTH_MGR)
+async def inventory_seed_defaults(property_id: str):
+    prop = await db.properties.find_one({"id": property_id}, {"_id": 0, "id": 1, "name": 1})
+    if not prop:
+        raise HTTPException(status_code=404, detail="Property not found")
+    existing = await db.inventory_items.find(
+        {"property_id": property_id}, {"_id": 0, "category": 1, "subtype": 1},
+    ).to_list(length=1000)
+    existing_keys = {(e["category"], e["subtype"]) for e in existing}
+    items = default_inventory_for_property(prop["id"], prop.get("name", ""))
+    to_insert = [it for it in items if (it["category"], it["subtype"]) not in existing_keys]
+    if to_insert:
+        await db.inventory_items.insert_many([it.copy() for it in to_insert])
     return {"inserted": len(to_insert), "skipped": len(items) - len(to_insert)}
 
 

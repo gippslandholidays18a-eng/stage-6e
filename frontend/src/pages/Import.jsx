@@ -1,6 +1,5 @@
 import { useRef, useState } from "react";
-import { api, API, fmtMoney } from "@/lib/api";
-import axios from "axios";
+import { api, fmtMoney } from "@/lib/api";
 import { toast } from "sonner";
 import { UploadCloud, FileText, CheckCircle2, AlertTriangle, X } from "lucide-react";
 import { useNavigate } from "react-router-dom";
@@ -25,7 +24,7 @@ export default function Import() {
     try {
       const form = new FormData();
       form.append("file", f);
-      const r = await axios.post(`${API}/import/preview`, form, {
+      const r = await api.post("/import/preview", form, {
         headers: { "Content-Type": "multipart/form-data" },
       });
       setPreview(r.data);
