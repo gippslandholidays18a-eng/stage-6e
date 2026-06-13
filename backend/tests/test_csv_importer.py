@@ -151,6 +151,9 @@ def test_guestpoint_person_detail_flow():
     assert r["lifetime_spend_reported"] == 4500.0
     assert r["nights_stayed"] == 12
     assert r["guest_email"] is None
+    # DD/MM/YYYY must be honoured — "01/05/2026" is 1 May 2026.
+    assert r["first_stay"] == "2026-01-01"
+    assert r["last_stay"] == "2026-05-01"
     # No reservation fields present.
     assert "reservation_id" not in r
 
@@ -170,6 +173,7 @@ def test_guestpoint_customer_export_flow_latin1():
     assert r["guest_last_name"] == "Andrà"  # Latin-1 decoded successfully
     assert r["guest_email"] == "marie@example.com"
     assert r["total_bookings_reported"] == 3
+    assert r["date_of_birth"] == "1990-01-01"
 
 
 def test_keep_row_tolerance_rules():
