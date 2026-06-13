@@ -28,7 +28,11 @@ export default function Import() {
         headers: { "Content-Type": "multipart/form-data" },
       });
       setPreview(r.data);
-      if (r.data.missing_required?.length) {
+      if (r.data.mode === "profile_enrichment") {
+        toast.success(`${r.data.platform} · ${r.data.valid_rows} guest profile${r.data.valid_rows === 1 ? "" : "s"} ready to enrich`);
+      } else if (r.data.platform && r.data.platform !== "Generic") {
+        toast.success(`${r.data.platform} · ${r.data.to_import_count ?? r.data.valid_rows} new, ${r.data.existing_count ?? 0} already exist`);
+      } else if (r.data.missing_required?.length) {
         toast.warning(`Missing required columns: ${r.data.missing_required.join(", ")}`);
       } else {
         toast.success(`Parsed ${r.data.valid_rows} of ${r.data.total_rows} rows`);
@@ -47,10 +51,17 @@ export default function Import() {
       const r = await api.post("/import/confirm", {
         filename: preview.filename,
         rows: preview.rows,
+        mode: preview.mode || "booking_import",
+        platform: preview.platform || "",
       });
-      toast.success(`Imported ${r.data.successful_rows} of ${r.data.total_rows} rows`);
+      const isEnrich = (preview.mode === "profile_enrichment");
+      if (isEnrich) {
+        toast.success(`Enriched ${r.data.inserted + r.data.updated} guest profiles · ${r.data.inserted} new, ${r.data.updated} updated`);
+      } else {
+        toast.success(`Imported ${r.data.successful_rows} new reservations` + (r.data.skipped_existing ? ` · ${r.data.skipped_existing} already existed` : ""));
+      }
       reset();
-      setTimeout(() => navigate("/reservations"), 400);
+      setTimeout(() => navigate(isEnrich ? "/segments" : "/reservations"), 400);
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Import failed");
     } finally {
@@ -145,52 +156,11 @@ export default function Import() {
           {preview && (
             <>
               <ValidationPanel preview={preview} />
-              <div className="surface rounded-md p-6">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h2 className="font-display text-lg">Preview · first 10 rows</h2>
-                    <p className="text-xs text-dim mt-1">
-                      {preview.valid_rows} of {preview.total_rows} rows ready to import
-                    </p>
-                  </div>
-                </div>
-                <div className="mt-5 overflow-x-auto">
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="text-[10px] uppercase tracking-[0.15em] text-[#6B7280]">
-                        <th className="text-left pb-3 pr-4 font-semibold">Reservation</th>
-                        <th className="text-left pb-3 pr-4 font-semibold">Guest</th>
-                        <th className="text-left pb-3 pr-4 font-semibold">Property</th>
-                        <th className="text-left pb-3 pr-4 font-semibold">Check-in</th>
-                        <th className="text-left pb-3 pr-4 font-semibold">Nights</th>
-                        <th className="text-right pb-3 pr-4 font-semibold">Value</th>
-                        <th className="text-left pb-3 pr-4 font-semibold">Raw source</th>
-                        <th className="text-left pb-3 font-semibold">→ Classified</th>
-                      </tr>
-                    </thead>
-                    <tbody data-testid="preview-table-body">
-                      {previewRows.map((r, i) => (
-                        <tr key={i} className="tbl-row">
-                          <td className="py-2.5 pr-4 font-mono text-[11px] text-dim">{r.reservation_id}</td>
-                          <td className="py-2.5 pr-4">
-                            {r.guest_first_name} {r.guest_last_name}
-                          </td>
-                          <td className="py-2.5 pr-4 text-dim">{r.property_name || "—"}</td>
-                          <td className="py-2.5 pr-4 text-dim">{r.checkin_date || "—"}</td>
-                          <td className="py-2.5 pr-4 text-dim">{r.nights ?? "—"}</td>
-                          <td className="py-2.5 pr-4 text-right tabular-nums">{fmtMoney(r.booking_value)}</td>
-                          <td className="py-2.5 pr-4 text-dim">{r.raw_booking_source || "—"}</td>
-                          <td className="py-2.5">
-                            <span className="text-white text-[11px] bg-[#1A1D24] border border-[#22252F] rounded px-2 py-0.5">
-                              {r.classified_source}
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+              {preview.mode === "profile_enrichment" ? (
+                <EnrichmentPreview preview={preview} previewRows={previewRows} />
+              ) : (
+                <BookingPreview preview={preview} previewRows={previewRows} />
+              )}
 
               <div className="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-end">
                 <button
@@ -202,15 +172,15 @@ export default function Import() {
                 </button>
                 <button
                   data-testid="confirm-import-button"
-                  disabled={
-                    confirming ||
-                    !preview.valid_rows ||
-                    (preview.missing_required && preview.missing_required.length > 0)
-                  }
+                  disabled={confirming || !preview.valid_rows}
                   onClick={handleConfirm}
                   className="bg-brand text-black px-6 py-2.5 rounded-md text-sm font-medium disabled:opacity-40 hover:opacity-90"
                 >
-                  {confirming ? "Importing…" : `Confirm import (${preview.valid_rows} rows)`}
+                  {confirming
+                    ? "Importing…"
+                    : preview.mode === "profile_enrichment"
+                      ? `Confirm enrichment (${preview.valid_rows} guests)`
+                      : `Confirm import (${preview.to_import_count ?? preview.valid_rows} new rows)`}
                 </button>
               </div>
             </>
@@ -224,29 +194,46 @@ export default function Import() {
 }
 
 function ValidationPanel({ preview }) {
-  const missing = preview.missing_required || [];
   const errors = preview.row_errors || [];
-  const ok = missing.length === 0 && errors.length === 0;
+  const isEnrich = preview.mode === "profile_enrichment";
+  const platform = preview.platform || "Generic";
+  const platformOk = platform !== "Generic" || preview.valid_rows > 0;
+
   return (
     <div className="surface rounded-md p-5" data-testid="validation-panel">
       <div className="flex items-center gap-2">
-        {ok ? (
-          <>
-            <CheckCircle2 className="w-4 h-4 text-[#419B72]" />
-            <span className="text-sm">All required columns detected · {preview.valid_rows} rows valid</span>
-          </>
+        {platformOk ? (
+          <CheckCircle2 className="w-4 h-4 text-[#419B72]" />
         ) : (
-          <>
-            <AlertTriangle className="w-4 h-4 text-[#E05A50]" />
-            <span className="text-sm">Validation issues</span>
-          </>
+          <AlertTriangle className="w-4 h-4 text-[#E05A50]" />
         )}
+        <span className="text-sm" data-testid="detected-platform">
+          Detected platform: <span className="text-white font-medium">{platform}</span>
+          {" · "}
+          <span className="uppercase tracking-[0.18em] text-[10px] text-dim">
+            {isEnrich ? "Guest Profile Enrichment" : "Booking Import"}
+          </span>
+        </span>
       </div>
-      {missing.length > 0 && (
-        <div className="mt-3 text-xs text-[#E05A50]">
-          Missing required columns: <span className="font-mono">{missing.join(", ")}</span>
+
+      {isEnrich ? (
+        <div className="mt-3 text-xs text-[#D9A05B] bg-[#D9A05B]/10 border border-[#D9A05B]/40 rounded-md px-3 py-2" data-testid="enrichment-banner">
+          This file will enrich existing guest profiles only. No reservation records will be created.
+          {preview.matched_by_email != null && (
+            <span className="block text-dim mt-1">
+              {preview.valid_rows} profile{preview.valid_rows === 1 ? "" : "s"} in file · {preview.matched_by_email} already match an existing guest by email.
+            </span>
+          )}
+        </div>
+      ) : (
+        <div className="mt-3 text-xs text-dim" data-testid="booking-banner">
+          {preview.valid_rows} reservation{preview.valid_rows === 1 ? "" : "s"} detected from {platform}.
+          {preview.to_import_count != null && (
+            <> {preview.to_import_count} will be imported, {preview.existing_count ?? 0} already exist and will be skipped.</>
+          )}
         </div>
       )}
+
       {errors.length > 0 && (
         <div className="mt-3 text-xs text-dim">
           {errors.length} rows skipped (showing first 5):{" "}
@@ -257,6 +244,104 @@ function ValidationPanel({ preview }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function BookingPreview({ preview, previewRows }) {
+  return (
+    <div className="surface rounded-md p-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="font-display text-lg">Preview · first 10 rows</h2>
+          <p className="text-xs text-dim mt-1">
+            {preview.valid_rows} of {preview.total_rows} rows ready to import
+          </p>
+        </div>
+      </div>
+      <div className="mt-5 overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-[10px] uppercase tracking-[0.15em] text-[#6B7280]">
+              <th className="text-left pb-3 pr-4 font-semibold">Reservation</th>
+              <th className="text-left pb-3 pr-4 font-semibold">Guest</th>
+              <th className="text-left pb-3 pr-4 font-semibold">Property</th>
+              <th className="text-left pb-3 pr-4 font-semibold">Check-in</th>
+              <th className="text-left pb-3 pr-4 font-semibold">Nights</th>
+              <th className="text-right pb-3 pr-4 font-semibold">Value</th>
+              <th className="text-left pb-3 pr-4 font-semibold">Raw source</th>
+              <th className="text-left pb-3 font-semibold">Cancelled</th>
+            </tr>
+          </thead>
+          <tbody data-testid="preview-table-body">
+            {previewRows.map((r, i) => (
+              <tr key={i} className="tbl-row">
+                <td className="py-2.5 pr-4 font-mono text-[11px] text-dim">{r.reservation_id}</td>
+                <td className="py-2.5 pr-4">
+                  {r.guest_first_name} {r.guest_last_name}
+                </td>
+                <td className="py-2.5 pr-4 text-dim">{r.property_name || "—"}</td>
+                <td className="py-2.5 pr-4 text-dim">{r.checkin_date || "—"}</td>
+                <td className="py-2.5 pr-4 text-dim">{r.nights ?? "—"}</td>
+                <td className="py-2.5 pr-4 text-right tabular-nums">
+                  {r.booking_value == null ? "—" : fmtMoney(r.booking_value)}
+                </td>
+                <td className="py-2.5 pr-4 text-dim">{r.raw_booking_source || "—"}</td>
+                <td className="py-2.5 text-dim">{r.is_cancelled ? "Yes" : "No"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function EnrichmentPreview({ preview, previewRows }) {
+  return (
+    <div className="surface rounded-md p-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="font-display text-lg">Preview · first 10 profiles</h2>
+          <p className="text-xs text-dim mt-1">
+            {preview.valid_rows} of {preview.total_rows} guest profiles ready to enrich
+          </p>
+        </div>
+      </div>
+      <div className="mt-5 overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-[10px] uppercase tracking-[0.15em] text-[#6B7280]">
+              <th className="text-left pb-3 pr-4 font-semibold">Guest</th>
+              <th className="text-left pb-3 pr-4 font-semibold">Email</th>
+              <th className="text-left pb-3 pr-4 font-semibold">Phone</th>
+              <th className="text-left pb-3 pr-4 font-semibold">City</th>
+              <th className="text-left pb-3 pr-4 font-semibold">Country</th>
+              <th className="text-right pb-3 pr-4 font-semibold">Total bookings</th>
+              <th className="text-right pb-3 font-semibold">Lifetime spend</th>
+            </tr>
+          </thead>
+          <tbody data-testid="preview-enrichment-body">
+            {previewRows.map((r, i) => (
+              <tr key={i} className="tbl-row">
+                <td className="py-2.5 pr-4">
+                  {r.guest_first_name} {r.guest_last_name}
+                </td>
+                <td className="py-2.5 pr-4 text-dim font-mono text-[11px]">{r.guest_email || "—"}</td>
+                <td className="py-2.5 pr-4 text-dim">{r.phone || "—"}</td>
+                <td className="py-2.5 pr-4 text-dim">{r.city || "—"}</td>
+                <td className="py-2.5 pr-4 text-dim">{r.country || "—"}</td>
+                <td className="py-2.5 pr-4 text-right tabular-nums text-dim">
+                  {r.total_bookings_reported ?? "—"}
+                </td>
+                <td className="py-2.5 text-right tabular-nums">
+                  {r.lifetime_spend_reported == null ? "—" : fmtMoney(r.lifetime_spend_reported)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

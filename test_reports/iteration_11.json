@@ -1,0 +1,49 @@
+{
+  "summary": "CSV importer (5-platform parser refactor) tested end-to-end against the public preview. Backend: 15/15 parser unit tests in /app/backend/tests/test_csv_importer.py PASS, and 13/14 new live integration tests in /app/backend/tests/test_import_integration.py PASS against the deployed API. Regression: 122/122 (Stage 6B+6C+6D + csv_importer unit suite) PASS. Frontend (Playwright on the public preview URL): admin login → /import flow validated for all three branches — Tokeet (booking import, banner + TOK- reservation id + 'Confirm import (1 new rows)' label), Guestpoint Person Detail (enrichment banner with exact spec text + 'Confirm enrichment (1 guests)' label + preview-enrichment-body), Preno (booking import, PRE-...-SMITH reservation id, raw_source 'Booking.com' from @guest.booking.com domain rule, value rendered as '—', cancelled 'No'). ONE backend parser bug found and reported: Guestpoint Person Detail / Customer Export date columns (First Stay, Last Stay, Date of Birth) are parsed without dayfirst=True, so DD/MM/YYYY values like '01/05/2026' (1 May 2026) come back as '2026-01-05' (5 Jan 2026). All other parser behaviour, tolerance rules, encoding fallback, RBAC and enrichment-vs-booking branching match spec.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "POST /api/import/preview (Guestpoint Person Detail + Guestpoint Customer Export)",
+        "issue": "parse_guestpoint_person_detail / parse_guestpoint_customer_export call parse_date(raw.get('First Stay')) / parse_date(raw.get('Last Stay')) / parse_date(raw.get('Date of Birth')) at /app/backend/csv_importer.py lines 332-333 and 360 WITHOUT dayfirst=True. Spec ('Guestpoint Person Detail dates also DD/MM/YYYY') says these are DD/MM/YYYY but pandas falls back to MM/DD interpretation for ambiguous values. Repro: '01/05/2026' (= 1 May 2026 DD/MM) is parsed to '2026-01-05' (= 5 Jan 2026). Existing pytest test_guestpoint_person_detail_flow doesn't assert specific dates so this is latent. Fix: pass dayfirst=True (and optionally fmts=['%d/%m/%Y']) for those three calls."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/dashboard", "issues": ["Pre-existing recharts width(-1)/height(-1) console warnings — already documented in iteration_10, not a regression of this change."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_csv_importer.py",
+    "/app/backend/tests/test_import_integration.py",
+    "/app/test_reports/pytest/import_integration.xml",
+    "/app/test_reports/pytest/regression.xml"
+  ],
+  "action_items": [
+    "Fix DD/MM/YYYY date parsing for Guestpoint Person Detail (First Stay, Last Stay) and Guestpoint Customer Export (Date of Birth) — pass dayfirst=True to parse_date at csv_importer.py:332-333 and :360. Optional: pass fmts=['%d/%m/%Y'] explicitly to make it deterministic and silence the pandas UserWarning currently logged by test_guestpoint_person_detail_flow.",
+    "(Nice-to-have) Update test_guestpoint_person_detail_flow / test_guestpoint_customer_export_flow_latin1 to assert specific ISO dates so this class of bug is caught at unit level."
+  ],
+  "critical_code_review_comments": [
+    "csv_importer.py is well-structured (decode → detect → per-platform parsers → keep_row tolerance). 5-platform detection priority order in detect_platform matches the spec (Tokeet → VikBooking → Preno → Guestpoint Person Detail → Guestpoint Customer Export → Generic).",
+    "Tolerance rule keep_row correctly skips ONLY when guest_name AND checkin_date are both empty — validated with both an empty-TOTAL row (kept, value=null) and a fully blank row (skipped, row_errors populated).",
+    "Encoding fallback works: 0xe0 Latin-1 byte for 'Andrà' silently decodes without 400; garbage bytes also decode via latin-1 replace and return 200.",
+    "DD/MM/YYYY handling is inconsistent: Tokeet/VikBooking/Preno parsers all pass dayfirst=True OR explicit fmts to parse_date, but the two Guestpoint enrichment parsers (lines 332-333, 360) call parse_date(value) with no dayfirst hint — defaults to dayfirst=False. Single-character fix.",
+    "_confirm_booking_import response shape (successful_rows / skipped_existing / failed_rows / total_rows / status / filename / imported_at / platform / mode) differs from _confirm_profile_enrichment (inserted / updated / failed_rows / total_rows / mode / status). The review request only specifies the enrichment shape; the booking_import shape is documented inconsistently in server.py vs the review request's loose 'verify via /api/reservations count delta' — both work, but consider aliasing 'inserted' = successful_rows in the booking_import response so the frontend / API consumers have one consistent key.",
+    "No DELETE /api/reservations/{id} endpoint exists — minor cleanup-hygiene issue for QA. Test data here used year 2099 to avoid collisions with seed/production data.",
+    "/api/import/preview is correctly gated by AUTH_MGR — staff 403 confirmed, no-auth 401 confirmed.",
+    "_confirm_profile_enrichment correctly upserts to NEW collection guest_enrichments (matches by email preferred, then name_key) and confirmed not to touch reservations collection (count unchanged before/after)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_import_integration.py (new — 14-case live integration suite against the public API for the CSV importer)"
+  ],
+  "success_rate": {"backend": "13/14 = 93% live integration (1 GP date bug); 15/15 = 100% parser unit; 122/122 = 100% regression suites", "frontend": "100% on the three branches tested (Tokeet, Guestpoint Person Detail, Preno) via Playwright on the public preview"},
+  "test_credentials": "Used admin@sourcebench.local / ChangeMe123! from /app/memory/test_credentials.md. Created (and torn down) TEST_csvimport_staff@sourcebench.local for the RBAC 403 check.",
+  "seed_data_creation": "Created 1 TEST staff user (deleted in fixture teardown). One enrichment upsert for marie+TESTcsv@example.com in the new guest_enrichments collection (idempotent — re-running just updates). One year-2099 reservation row from the booking-import confirm test — harmless (outside any analytics window) but left in place because no DELETE /api/reservations endpoint exists. The 15 properties / 375 inventory items / seed admin were NOT modified.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend: run `REACT_APP_BACKEND_URL=https://str-analytics-core.preview.emergentagent.com pytest /app/backend/tests/test_import_integration.py -v` (14 tests, ~5s). The one failing test (test_preview_guestpoint_person_detail) will pass once parse_date in csv_importer.py:332-333 is given dayfirst=True. The booking_import live test uses year 2099 to avoid id collisions — keep that pattern since no DELETE reservation endpoint exists. Frontend: data-testids on Import.jsx are stable (import-page, csv-file-input, validation-panel, detected-platform, booking-banner, enrichment-banner, preview-table-body, preview-enrichment-body, confirm-import-button, cancel-import-button). Login form uses input[type=email]/password + button:has-text('Sign in') — after login the user lands on / (Dashboard), not /properties; assert by 'not on /login' instead.",
+  "rca of the issue": "GP Person Detail DD/MM/YYYY misparse — root cause: /app/backend/csv_importer.py parse_guestpoint_person_detail (lines 332-333) calls parse_date(raw.get('First Stay')) and parse_date(raw.get('Last Stay')) with positional-only args. parse_date defaults dayfirst=False, so the fallback `pd.to_datetime(s, errors='coerce', dayfirst=False)` (line 128) interprets '01/05/2026' as MM/DD → '2026-01-05'. Same defect on line 360 for the Customer Export Date of Birth. The other platform parsers (Tokeet line 222-224 use explicit %d %b fmts, VikBooking line 247-249 pass dayfirst=True + %d/%m/%Y, Preno line 281-282 pass dayfirst=True + %d/%m/%Y) all correctly honour the Australian DD/MM/YYYY convention. Reproduction: POST /api/import/preview with the gp_person.csv fixture in /tmp/csv_samples/ → rows[0].last_stay == '2026-01-05' (wrong) for input '01/05/2026'. Mitigation: change lines 332-333 to `parse_date(raw.get('First Stay'), ['%d/%m/%Y'], dayfirst=True)` (same for Last Stay), and line 360 to `parse_date(raw.get('Date of Birth'), ['%d/%m/%Y'], dayfirst=True)`. This also silences the existing 'Parsing dates in %d/%m/%Y format when dayfirst=False' UserWarning logged during pytest."
+}

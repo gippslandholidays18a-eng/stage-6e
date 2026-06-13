@@ -106,6 +106,7 @@ from inventory_service import (
     restock_patch as inv_restock_patch,
     summarise as inv_summarise,
 )
+import csv_importer
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -367,6 +368,8 @@ class ImportLog(BaseModel):
 class ConfirmImportPayload(BaseModel):
     filename: str
     rows: List[Dict[str, Any]]
+    mode: Optional[str] = "booking_import"  # or "profile_enrichment"
+    platform: Optional[str] = ""
 
 
 class SourceOverridePayload(BaseModel):
@@ -487,47 +490,39 @@ async def list_sources():
 
 @api.post("/import/preview", dependencies=AUTH_MGR)
 async def import_preview(file: UploadFile = File(...)):
-    """Parse uploaded CSV; return all normalised rows + column mapping + validation."""
+    """Parse uploaded CSV; detect platform (Tokeet / VikBooking / Preno /
+    Guestpoint Person Detail / Guestpoint Customer Export / Generic) and
+    return normalised rows. Encoding falls back UTF-8 → Latin-1 silently."""
     if not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only .csv files are accepted")
 
     contents = await file.read()
     try:
-        df = pd.read_csv(io.BytesIO(contents), dtype=str, keep_default_na=False, na_values=[""])
+        result = csv_importer.parse_upload(contents, file.filename)
     except Exception as e:
+        logger.exception("import preview failed: %s", e)
         raise HTTPException(status_code=400, detail=f"Could not parse CSV: {e}")
 
-    if df.empty:
-        raise HTTPException(status_code=400, detail="CSV is empty")
+    if result["mode"] == "booking_import":
+        # Count rows that already exist (for the user-friendly "Y already exist" message).
+        existing = 0
+        ids = [r["reservation_id"] for r in result["rows"] if r.get("reservation_id")]
+        if ids:
+            cursor = db.reservations.find({"reservation_id": {"$in": ids}}, {"_id": 0, "reservation_id": 1})
+            existing = len(await cursor.to_list(length=len(ids)))
+        result["existing_count"] = existing
+        result["to_import_count"] = max(0, len(result["rows"]) - existing)
+    else:
+        # Profile enrichment summary
+        emails = [r.get("guest_email") for r in result["rows"] if r.get("guest_email")]
+        matched_by_email = 0
+        if emails:
+            cursor = db.guests.find({"email": {"$in": emails}}, {"_id": 0, "email": 1})
+            matched_by_email = len(await cursor.to_list(length=len(emails)))
+        result["matched_by_email"] = matched_by_email
+        result["enrichment_count"] = len(result["rows"])
 
-    headers = list(df.columns)
-    mapping = detect_column_mapping(headers)
-
-    missing_required = [f for f in REQUIRED_FIELDS if mapping.get(f) is None]
-
-    raw_rows = df.to_dict(orient="records")
-    normalised: List[Dict[str, Any]] = []
-    row_errors: List[Dict[str, Any]] = []
-    for idx, raw in enumerate(raw_rows):
-        try:
-            n = normalise_row(raw, mapping)
-            if not n["reservation_id"]:
-                row_errors.append({"row": idx + 2, "error": "Missing reservation id"})
-                continue
-            normalised.append(n)
-        except Exception as e:
-            row_errors.append({"row": idx + 2, "error": str(e)})
-
-    return {
-        "filename": file.filename,
-        "headers": headers,
-        "mapping": mapping,
-        "missing_required": missing_required,
-        "total_rows": len(raw_rows),
-        "valid_rows": len(normalised),
-        "row_errors": row_errors[:50],
-        "rows": normalised,  # full list (frontend slices preview)
-    }
+    return result
 
 
 @api.post("/import/confirm", dependencies=AUTH_MGR)
@@ -536,30 +531,48 @@ async def import_confirm(payload: ConfirmImportPayload):
         raise HTTPException(status_code=400, detail="No rows to import")
 
     now = _now_iso()
-    docs = []
+    mode = payload.mode or "booking_import"
+
+    if mode == "profile_enrichment":
+        return await _confirm_profile_enrichment(payload, now)
+
+    return await _confirm_booking_import(payload, now)
+
+
+async def _confirm_booking_import(payload: ConfirmImportPayload, now: str) -> Dict[str, Any]:
+    docs: List[Dict[str, Any]] = []
     failed = 0
+    skipped_existing = 0
     for r in payload.rows:
         try:
             rid = str(r.get("reservation_id", "")).strip()
             if not rid:
                 failed += 1
                 continue
+            # Tolerant defaults — never block on missing optional fields.
+            booking_value = r.get("booking_value")
+            try:
+                booking_value = float(booking_value) if booking_value is not None and booking_value != "" else None
+            except (ValueError, TypeError):
+                booking_value = None
             doc = {
                 "id": str(uuid.uuid4()),
                 "reservation_id": rid,
-                "guest_first_name": r.get("guest_first_name", "") or "",
-                "guest_last_name": r.get("guest_last_name", "") or "",
-                "guest_email": r.get("guest_email", "") or "",
-                "property_name": r.get("property_name", "") or "",
+                "guest_first_name": r.get("guest_first_name") or "",
+                "guest_last_name": r.get("guest_last_name") or "",
+                "guest_email": r.get("guest_email") or "",
+                "property_name": r.get("property_name") or "",
                 "checkin_date": r.get("checkin_date"),
                 "checkout_date": r.get("checkout_date"),
                 "nights": r.get("nights"),
                 "guest_count": r.get("guest_count"),
-                "booking_value": float(r.get("booking_value") or 0),
-                "raw_booking_source": r.get("raw_booking_source", "") or "",
-                "classified_source": classify_source(r.get("raw_booking_source", "")),
+                "booking_value": booking_value if booking_value is not None else 0.0,
+                "raw_booking_source": r.get("raw_booking_source") or "",
+                "classified_source": classify_source(r.get("raw_booking_source") or ""),
                 "booking_date": r.get("booking_date"),
                 "is_cancelled": bool(r.get("is_cancelled", False)),
+                "room_number": r.get("room_number") or None,
+                "import_platform": payload.platform or "",
                 "imported_at": now,
                 "manually_overridden": False,
             }
@@ -568,19 +581,17 @@ async def import_confirm(payload: ConfirmImportPayload):
             logger.exception("row failed: %s", e)
             failed += 1
 
-    if docs:
-        # Upsert by reservation_id to allow appending without strict duplicates
-        for d in docs:
-            await db.reservations.update_one(
-                {"reservation_id": d["reservation_id"]},
-                {"$setOnInsert": d},
-                upsert=True,
-            )
+    inserted = 0
+    for d in docs:
+        existed = await db.reservations.find_one({"reservation_id": d["reservation_id"]}, {"_id": 1})
+        if existed:
+            skipped_existing += 1
+            continue
+        await db.reservations.insert_one(d.copy())
+        inserted += 1
 
-    # Stage 2: recompute guest profiles + segments after each import
     try:
         await recompute_all_guests(db)
-        # Stage 3: scores + OTA commission
         await recalculate_all_scores(db)
     except Exception as e:
         logger.exception("guest recompute failed: %s", e)
@@ -590,9 +601,91 @@ async def import_confirm(payload: ConfirmImportPayload):
         "filename": payload.filename,
         "imported_at": now,
         "total_rows": len(payload.rows),
-        "successful_rows": len(docs),
+        "successful_rows": inserted,
         "failed_rows": failed,
-        "status": "completed" if failed == 0 else ("partial" if docs else "failed"),
+        "skipped_existing": skipped_existing,
+        "platform": payload.platform or "",
+        "mode": "booking_import",
+        "status": "completed" if failed == 0 else ("partial" if inserted else "failed"),
+    }
+    await db.import_logs.insert_one(log.copy())
+    return _strip_id(log)
+
+
+async def _confirm_profile_enrichment(payload: ConfirmImportPayload, now: str) -> Dict[str, Any]:
+    """Upsert enrichment rows into the `guest_enrichments` collection. Matches
+    by guest_email (preferred) then by normalised first+last name. Never
+    creates reservation records."""
+    inserted = 0
+    updated = 0
+    failed = 0
+    for r in payload.rows:
+        try:
+            email = (r.get("guest_email") or "").strip().lower() or None
+            first = (r.get("guest_first_name") or "").strip()
+            last = (r.get("guest_last_name") or "").strip()
+            if not email and not (first or last):
+                failed += 1
+                continue
+            name_key = re.sub(r"\s+", " ", f"{first} {last}".strip().lower())
+            match: Dict[str, Any] = {}
+            if email:
+                match["email"] = email
+            else:
+                match["name_key"] = name_key
+
+            enrichment_doc = {
+                "email": email,
+                "name_key": name_key,
+                "first_name": first,
+                "last_name": last,
+                "phone": r.get("phone"),
+                "address": r.get("address"),
+                "city": r.get("city"),
+                "state": r.get("state"),
+                "postcode": r.get("postcode"),
+                "country": r.get("country"),
+                "gender": r.get("gender"),
+                "date_of_birth": r.get("date_of_birth"),
+                "first_stay": r.get("first_stay"),
+                "last_stay": r.get("last_stay"),
+                "nights_stayed_reported": r.get("nights_stayed"),
+                "lifetime_spend_reported": r.get("lifetime_spend_reported"),
+                "total_bookings_reported": r.get("total_bookings_reported"),
+                "notes": r.get("notes"),
+                "source_platform": r.get("source_platform") or payload.platform or "",
+                "updated_at": now,
+            }
+            # Strip Nones so we don't overwrite existing values with blanks.
+            set_doc = {k: v for k, v in enrichment_doc.items() if v not in (None, "")}
+            existing = await db.guest_enrichments.find_one(match, {"_id": 1})
+            if existing:
+                await db.guest_enrichments.update_one(
+                    {"_id": existing["_id"]},
+                    {"$set": set_doc},
+                )
+                updated += 1
+            else:
+                set_doc["id"] = str(uuid.uuid4())
+                set_doc["created_at"] = now
+                await db.guest_enrichments.insert_one(set_doc)
+                inserted += 1
+        except Exception as e:
+            logger.exception("enrichment row failed: %s", e)
+            failed += 1
+
+    log = {
+        "id": str(uuid.uuid4()),
+        "filename": payload.filename,
+        "imported_at": now,
+        "total_rows": len(payload.rows),
+        "successful_rows": inserted + updated,
+        "failed_rows": failed,
+        "inserted": inserted,
+        "updated": updated,
+        "platform": payload.platform or "",
+        "mode": "profile_enrichment",
+        "status": "completed" if failed == 0 else ("partial" if (inserted + updated) else "failed"),
     }
     await db.import_logs.insert_one(log.copy())
     return _strip_id(log)
