@@ -34,6 +34,13 @@ export default function ReviewFormModal({ initial, properties, onClose, onSaved 
   const [draft, setDraft] = useState(() => (isEdit
     ? {
         ...BLANK, ...initial,
+        guest_name: initial.guest_name || "",
+        guest_email: initial.guest_email || "",
+        property_name: initial.property_name || "",
+        reservation_id: initial.reservation_id || "",
+        review_text: initial.review_text || "",
+        management_response: initial.management_response || "",
+        internal_notes: initial.internal_notes || "",
         review_date: initial.review_date || BLANK.review_date,
         category_tags: initial.category_tags || [],
       }
