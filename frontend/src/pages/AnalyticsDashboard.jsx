@@ -4,6 +4,7 @@ import { api, fmtAUD, fmtNumber, fmtPct, SOURCE_COLORS, CHANNEL_COLORS } from "@
 import AnalyticsFilters, { buildParams } from "@/components/AnalyticsFilters";
 import { SegmentBadge } from "@/components/SegmentBadge";
 import TasksAttentionWidget from "@/components/TasksAttentionWidget";
+import ReviewsKPICard from "@/components/ReviewsKPICard";
 import {
   BarChart,
   Bar,
@@ -86,6 +87,8 @@ export default function AnalyticsDashboard() {
       <AnalyticsFilters value={filters} onChange={setFilters} />
 
       <TasksAttentionWidget />
+
+      <ReviewsKPICard />
 
       {/* Section tabs */}
       <div className="flex flex-wrap gap-1 border-b divider" data-testid="section-tabs">

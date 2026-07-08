@@ -1,0 +1,43 @@
+{
+  "summary": "Stage 6E — Guest review tracker — fully tested end-to-end against the public preview. Backend: NEW pytest suite /app/backend/tests/test_stage6e_reviews.py = 31/31 PASS (meta shape + auth, CRUD + priority/sentiment/response_status derivation, priority_flag_manual override + revert, sentiment manual override, rating/source validation 400s, all 8 GET filter permutations, analytics shape+math, /reviews/for-guest lowercase+sort, CSV import preview→confirm with priority reconciliation, RBAC: 401 no-auth, meta OK for staff, staff visibility filter, staff POST/PUT/DELETE 403). Regression: 122/122 PASS (test_stage6b_tasks + test_stage6c_schedules + test_stage6d_inventory_and_auth + test_csv_importer). Frontend (Playwright on the public preview URL): admin login → Dashboard reviews-kpi-card renders (avg + response + priority Links); Sidebar nav-reviews visible (admin+manager); /reviews page renders 4 KPIs + analytics-by-property + analytics-by-source panels once data exists + all 7 filter widgets; new-review-button opens review-form-modal → fill guest_name/star-2/Booking.com/chip-cleanliness+communication/review_text → sentiment auto-set to Negative → submit → modal closes + 'Add another' toast fires + review appears in reviews-list with priority-badge-{id}; edit-review-{id} opens pre-filled → toggle response_sent to true → save → 'Review updated' toast + priority badge disappears; delete-review-{id} removes the row. Staff RBAC on frontend: nav-reviews HIDDEN for staff, new-review-button HIDDEN on /reviews for staff, and staff sees ONLY reviews for their assigned_properties (verified by seeding 2 reviews across 2 properties, then confirming the staff sees exactly 1). GuestReviewsPanel: navigating to /guests/{id} shows the guest-reviews-panel below cancellation history. Regression smoke: /, /tasks, /inventory, /reservations, /segments, /import, /properties, /campaigns, /reports all load without console errors (recharts width(-1)/height(-1) warnings are pre-existing, unchanged from iteration_10-11).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/reviews and other dashboards", "issues": ["Pre-existing recharts width(-1)/height(-1) container warnings on initial render — documented in iteration_10/11, not regressed."]},
+      {"screen": "ReviewFormModal (edit mode)", "issues": ["React warning `\\`value\\` prop on \\`input\\` should not be null` fires once when opening the edit modal for a review with a null review_date/guest_email. Non-blocking — the initial spread merges over BLANK so most fields end up string. Minor: normalise `initial.guest_email ?? \"\"` in the useState initializer (ReviewFormModal.jsx:34-41) to silence the warning."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_stage6e_reviews.py",
+    "/app/test_reports/pytest/stage6e_results.xml",
+    "/app/test_reports/pytest/regression_6e.xml"
+  ],
+  "action_items": [
+    "(Optional polish) In ReviewFormModal.jsx BLANK spread merger, coerce null string fields to '' to silence the 'value prop should not be null' React warning (edit mode). Non-blocking."
+  ],
+  "critical_code_review_comments": [
+    "review_service.py is clean and well-factored: SOURCE_PLATFORMS (9), CATEGORY_TAGS (7), SENTIMENTS (3) match spec exactly. compute_priority_flag correctly treats priority_flag_manual=None as 'auto rule' and any bool as override. suggest_sentiment thresholds (>=5 Positive, >=3 Neutral, else Negative) match spec.",
+    "PUT /api/reviews/{rid} handler in server.py (lines 2897-2943) does the right thing: it merges patch over existing, THEN runs _apply_review_recompute which only re-derives sentiment when the current merged sentiment is falsy — so manual sentiment persists through a PUT that touches other fields (verified by test_manual_sentiment_persists and test_flip_response_sent_clears_priority_but_keeps_sentiment).",
+    "_review_visibility for staff with empty assigned_properties returns `{property_id: '__none__'}` which correctly returns zero rows (rather than leaking everything). Good defensive default.",
+    "GET /api/reviews `q` search is applied client-side (in-memory) AFTER the Mongo filter — fine for the current data volume (5000 row cap) but could become a hot-spot at scale. Consider a Mongo text index or regex $or match on the four fields if the collection grows past a few thousand.",
+    "CSV import: parse_reviews_csv correctly reuses csv_importer.decode_csv_bytes for encoding fallback and normalises source/categories/sentiment on the way in. sentiment defaults to suggest_sentiment(rating) when the CSV column is empty. Priority flag is recomputed at insert time (via build_review) so a rating=1 unresponded row does get priority=true even if the CSV had no such column.",
+    "Frontend Reviews.jsx: onSaved passes wasCreate correctly so the 'Add another' toast action is only shown on create — matches spec. Edit path shows 'Review updated' toast (no 'Add another'). Good UX distinction.",
+    "ReviewsKPICard on the dashboard correctly wraps each KPI in <Link to='/reviews'> (and /reviews?priority_only=1 for the priority tile) so the KPIs are all clickable navigations as required.",
+    "Frontend Layout.jsx sidebar entry 'nav-reviews' is gated to admin+manager only — confirmed hidden for staff. The route itself is not gated in App.js (staff can direct-navigate to /reviews) — Reviews.jsx correctly hides the new-review-button and the useEffect fetches analytics only when isMgr, so staff see a scoped list with no write actions. This matches the review request note ('route not admin-gated on frontend — verify only their assigned-property reviews load and new-review-button is NOT shown').",
+    "GuestReviewsPanel uses /api/reviews/for-guest?email=… which lowercases the query — correctly handles mixed-case emails from the CRM. Verified via test_for_guest_lowercase_and_sort."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_stage6e_reviews.py (new — 31-case pytest suite for Stage 6E)"
+  ],
+  "success_rate": {"backend": "31/31 = 100% (Stage 6E new suite) + 122/122 = 100% regression (6B/6C/6D/csv_importer)", "frontend": "100% on all Stage 6E flows (admin create/edit/delete/toast/priority badge/analytics panels/dashboard KPI card; staff nav-hide + new-review-button-hide + visibility filter; guest-reviews-panel) + 9/9 regression pages load without console errors"},
+  "test_credentials": "Used admin@sourcebench.local / ChangeMe123! from /app/memory/test_credentials.md. Created (and torn down in fixture teardown) TEST_rev_mgr_… / TEST_rev_staff_… / TEST_ui_staff_… users, all TEST_-prefixed reviews, and all UIViz-prefixed review data. Final state: 0 test reviews remain, 0 test users remain.",
+  "seed_data_creation": "All test data self-created + cleaned up. No modification to the 15 managed properties, 375 baseline inventory items, 180 schedule items, or seed admin.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run `REACT_APP_BACKEND_URL=https://str-analytics-core.preview.emergentagent.com pytest /app/backend/tests/test_stage6e_reviews.py -v` (31 tests, ~9s). All fixtures self-provision managers/staff/reviews and clean up. If a Stage 6E field is added later, update ReviewCreate/ReviewUpdate models + build_review + _apply_review_recompute in server.py together — the update-vs-create sentiment/priority persistence logic is subtle. The only non-blocking issue observed is a React 'value prop should not be null' warning in ReviewFormModal edit mode — no functional impact."
+}

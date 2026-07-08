@@ -107,6 +107,7 @@ from inventory_service import (
     summarise as inv_summarise,
 )
 import csv_importer
+import review_service
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -1601,6 +1602,10 @@ async def startup_seed():
         await db.schedule_items.create_index("next_due_at")
         await db.inventory_items.create_index("property_id")
         await db.inventory_items.create_index([("category", 1), ("subtype", 1)])
+        await db.reviews.create_index([("review_date", -1), ("created_at", -1)])
+        await db.reviews.create_index("guest_email")
+        await db.reviews.create_index("property_id")
+        await db.reviews.create_index("priority_flag")
         # Auto-seed default schedule items onto any property that doesn't have any yet.
         async for prop in db.properties.find({}, {"_id": 0, "id": 1, "name": 1}):
             exists = await db.schedule_items.find_one({"property_id": prop["id"]}, {"_id": 1})
@@ -2691,6 +2696,310 @@ async def inventory_seed_defaults(property_id: str):
     if to_insert:
         await db.inventory_items.insert_many([it.copy() for it in to_insert])
     return {"inserted": len(to_insert), "skipped": len(items) - len(to_insert)}
+
+
+# --- Stage 6E — Guest review tracker ----------------------------------------
+
+class ReviewCreate(BaseModel):
+    guest_name: str
+    guest_email: Optional[str] = None
+    property_name: Optional[str] = ""
+    property_id: Optional[str] = None
+    reservation_id: Optional[str] = None
+    rating: Optional[int] = None
+    source_platform: str = "Other"
+    review_text: Optional[str] = ""
+    review_date: Optional[str] = None
+    category_tags: Optional[List[str]] = None
+    sentiment: Optional[str] = None
+    management_response: Optional[str] = ""
+    response_sent: Optional[bool] = False
+    internal_notes: Optional[str] = ""
+    priority_flag_manual: Optional[bool] = None
+
+
+class ReviewUpdate(BaseModel):
+    guest_name: Optional[str] = None
+    guest_email: Optional[str] = None
+    property_name: Optional[str] = None
+    property_id: Optional[str] = None
+    reservation_id: Optional[str] = None
+    rating: Optional[int] = None
+    source_platform: Optional[str] = None
+    review_text: Optional[str] = None
+    review_date: Optional[str] = None
+    category_tags: Optional[List[str]] = None
+    sentiment: Optional[str] = None
+    management_response: Optional[str] = None
+    response_sent: Optional[bool] = None
+    internal_notes: Optional[str] = None
+    priority_flag_manual: Optional[bool] = None
+
+
+class ReviewImportConfirm(BaseModel):
+    filename: str
+    rows: List[Dict[str, Any]]
+
+
+def _apply_review_recompute(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Recompute derived fields (sentiment default, priority_flag, response_status)."""
+    rating = doc.get("rating")
+    if rating is not None:
+        rating = int(rating)
+    manual = doc.get("priority_flag_manual")
+    doc["priority_flag"] = review_service.compute_priority_flag(
+        rating=rating,
+        response_sent=bool(doc.get("response_sent")),
+        manual=manual,
+    )
+    if not doc.get("sentiment"):
+        doc["sentiment"] = review_service.suggest_sentiment(rating)
+    doc["response_status"] = "responded" if doc.get("response_sent") else "unresponded"
+    return doc
+
+
+def _review_visibility(user: Dict[str, Any]) -> Dict[str, Any]:
+    if user.get("role") in ("admin", "manager"):
+        return {}
+    props = user.get("assigned_properties") or []
+    if not props:
+        return {"property_id": "__none__"}
+    return {"property_id": {"$in": props}}
+
+
+@api.get("/reviews/meta", dependencies=AUTH_ANY)
+async def reviews_meta():
+    return {
+        "sources": review_service.SOURCE_PLATFORMS,
+        "categories": review_service.CATEGORY_TAGS,
+        "sentiments": review_service.SENTIMENTS,
+    }
+
+
+@api.get("/reviews/analytics", dependencies=AUTH_MGR)
+async def reviews_analytics(
+    property_id: Optional[str] = None,
+    source_platform: Optional[str] = None,
+):
+    q: Dict[str, Any] = {}
+    if property_id:
+        q["property_id"] = property_id
+    if source_platform:
+        q["source_platform"] = source_platform
+    cursor = db.reviews.find(q, {"_id": 0})
+    items = await cursor.to_list(length=20000)
+    return review_service.build_analytics(items)
+
+
+@api.get("/reviews/for-guest", dependencies=AUTH_MGR)
+async def reviews_for_guest(email: Optional[str] = None, guest_id: Optional[str] = None):
+    q: Dict[str, Any] = {}
+    if email:
+        q["guest_email"] = email.lower()
+    elif guest_id:
+        q["guest_id"] = guest_id
+    else:
+        raise HTTPException(status_code=400, detail="email or guest_id is required")
+    cursor = db.reviews.find(q, {"_id": 0}).sort("review_date", -1)
+    items = await cursor.to_list(length=500)
+    return {"items": items}
+
+
+@api.get("/reviews")
+async def reviews_list(
+    property_id: Optional[str] = None,
+    source_platform: Optional[str] = None,
+    sentiment: Optional[str] = None,
+    priority_only: Optional[bool] = False,
+    responded: Optional[str] = None,  # "yes"/"no"/None
+    rating_min: Optional[int] = None,
+    rating_max: Optional[int] = None,
+    q: Optional[str] = None,
+    user: Dict[str, Any] = Depends(current_user_dep),
+):
+    query = _review_visibility(user)
+    if property_id:
+        query["property_id"] = property_id
+    if source_platform:
+        query["source_platform"] = source_platform
+    if sentiment:
+        query["sentiment"] = sentiment
+    if rating_min is not None or rating_max is not None:
+        rq: Dict[str, Any] = {}
+        if rating_min is not None:
+            rq["$gte"] = int(rating_min)
+        if rating_max is not None:
+            rq["$lte"] = int(rating_max)
+        query["rating"] = rq
+    if responded == "yes":
+        query["response_sent"] = True
+    elif responded == "no":
+        query["response_sent"] = False
+    if priority_only:
+        query["priority_flag"] = True
+    cursor = db.reviews.find(query, {"_id": 0}).sort([("review_date", -1), ("created_at", -1)])
+    items = await cursor.to_list(length=5000)
+    if q and q.strip():
+        needle = q.strip().lower()
+        items = [
+            r for r in items
+            if needle in (r.get("guest_name", "") or "").lower()
+            or needle in (r.get("guest_email", "") or "").lower()
+            or needle in (r.get("review_text", "") or "").lower()
+            or needle in (r.get("property_name", "") or "").lower()
+        ]
+    return {"items": items}
+
+
+@api.post("/reviews", dependencies=AUTH_MGR)
+async def reviews_create(
+    payload: ReviewCreate,
+    actor: Dict[str, Any] = Depends(require_role_dep("admin", "manager")),
+):
+    if payload.source_platform not in review_service.SOURCE_PLATFORMS:
+        raise HTTPException(status_code=400, detail="Invalid source_platform")
+    if payload.rating is not None and (payload.rating < 1 or payload.rating > 5):
+        raise HTTPException(status_code=400, detail="Rating must be 1-5")
+    if not (payload.guest_name and payload.guest_name.strip()):
+        raise HTTPException(status_code=400, detail="Guest name is required")
+    doc = review_service.build_review(
+        guest_name=payload.guest_name,
+        guest_email=payload.guest_email,
+        property_name=payload.property_name or "",
+        property_id=payload.property_id,
+        reservation_id=payload.reservation_id,
+        rating=payload.rating,
+        source_platform=payload.source_platform,
+        review_text=payload.review_text or "",
+        review_date=payload.review_date,
+        category_tags=payload.category_tags or [],
+        sentiment=payload.sentiment,
+        management_response=payload.management_response or "",
+        response_sent=bool(payload.response_sent),
+        internal_notes=payload.internal_notes or "",
+        priority_flag_manual=payload.priority_flag_manual,
+        created_by=actor["id"],
+        created_by_name=actor.get("name") or actor.get("email", ""),
+    )
+    await db.reviews.insert_one(doc.copy())
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/reviews/{rid}", dependencies=AUTH_MGR)
+async def reviews_get(rid: str):
+    doc = await db.reviews.find_one({"id": rid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Not found")
+    return doc
+
+
+@api.put("/reviews/{rid}", dependencies=AUTH_MGR)
+async def reviews_update(rid: str, payload: ReviewUpdate):
+    existing = await db.reviews.find_one({"id": rid}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Not found")
+    data = payload.model_dump(exclude_unset=True)
+    patch: Dict[str, Any] = {}
+    for k in ("guest_name", "review_text", "property_name", "reservation_id",
+              "management_response", "internal_notes"):
+        if k in data and data[k] is not None:
+            patch[k] = str(data[k]).strip()
+    if "guest_email" in data:
+        patch["guest_email"] = (data["guest_email"] or "").strip().lower() or None
+    if "property_id" in data:
+        patch["property_id"] = data["property_id"] or None
+    if "rating" in data and data["rating"] is not None:
+        r = int(data["rating"])
+        if r < 1 or r > 5:
+            raise HTTPException(status_code=400, detail="Rating must be 1-5")
+        patch["rating"] = r
+    if "source_platform" in data and data["source_platform"]:
+        if data["source_platform"] not in review_service.SOURCE_PLATFORMS:
+            raise HTTPException(status_code=400, detail="Invalid source_platform")
+        patch["source_platform"] = data["source_platform"]
+    if "review_date" in data:
+        patch["review_date"] = data["review_date"] or None
+    if "category_tags" in data and data["category_tags"] is not None:
+        patch["category_tags"] = review_service.normalise_categories(data["category_tags"])
+    if "sentiment" in data and data["sentiment"]:
+        if data["sentiment"] not in review_service.SENTIMENTS:
+            raise HTTPException(status_code=400, detail="Invalid sentiment")
+        patch["sentiment"] = data["sentiment"]
+    if "response_sent" in data and data["response_sent"] is not None:
+        patch["response_sent"] = bool(data["response_sent"])
+    if "priority_flag_manual" in data:
+        patch["priority_flag_manual"] = data["priority_flag_manual"]
+    patch["updated_at"] = review_service.now_iso()
+
+    merged = {**existing, **patch}
+    merged = _apply_review_recompute(merged)
+    patch["priority_flag"] = merged["priority_flag"]
+    patch["sentiment"] = merged["sentiment"]
+    patch["response_status"] = merged["response_status"]
+
+    await db.reviews.update_one({"id": rid}, {"$set": patch})
+    doc = await db.reviews.find_one({"id": rid}, {"_id": 0})
+    return doc
+
+
+@api.delete("/reviews/{rid}", dependencies=AUTH_MGR)
+async def reviews_delete(rid: str):
+    res = await db.reviews.delete_one({"id": rid})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"deleted": True}
+
+
+@api.post("/reviews/import/preview", dependencies=AUTH_MGR)
+async def reviews_import_preview(file: UploadFile = File(...)):
+    if not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Only .csv files are accepted")
+    contents = await file.read()
+    return review_service.parse_reviews_csv(contents, file.filename)
+
+
+@api.post("/reviews/import/confirm", dependencies=AUTH_MGR)
+async def reviews_import_confirm(
+    payload: ReviewImportConfirm,
+    actor: Dict[str, Any] = Depends(require_role_dep("admin", "manager")),
+):
+    if not payload.rows:
+        raise HTTPException(status_code=400, detail="No rows to import")
+    inserted = 0
+    failed = 0
+    for r in payload.rows:
+        try:
+            doc = review_service.build_review(
+                guest_name=r.get("guest_name") or "",
+                guest_email=r.get("guest_email"),
+                property_name=r.get("property_name") or "",
+                property_id=None,
+                reservation_id=r.get("reservation_id"),
+                rating=r.get("rating"),
+                source_platform=r.get("source_platform") or "Other",
+                review_text=r.get("review_text") or "",
+                review_date=r.get("review_date"),
+                category_tags=r.get("category_tags") or [],
+                sentiment=r.get("sentiment"),
+                management_response=r.get("management_response") or "",
+                response_sent=bool(r.get("response_sent")),
+                internal_notes=r.get("internal_notes") or "",
+                priority_flag_manual=None,
+                created_by=actor["id"],
+                created_by_name=actor.get("name") or actor.get("email", ""),
+            )
+            await db.reviews.insert_one(doc.copy())
+            inserted += 1
+        except Exception as e:
+            logger.exception("review import row failed: %s", e)
+            failed += 1
+    return {
+        "filename": payload.filename,
+        "inserted": inserted,
+        "failed": failed,
+        "total": len(payload.rows),
+    }
 
 
 MANAGED_PROPERTIES = [

@@ -3,6 +3,7 @@ import { useParams, Link } from "react-router-dom";
 import { api, fmtMoney, fmtNumber, fmtDate, SOURCE_COLORS } from "@/lib/api";
 import { SegmentBadge } from "@/components/SegmentBadge";
 import { ChevronLeft, AlertTriangle, Mail, Building2, Calendar } from "lucide-react";
+import GuestReviewsPanel from "@/components/GuestReviewsPanel";
 
 export default function GuestProfile() {
   const { id } = useParams();
@@ -113,6 +114,9 @@ export default function GuestProfile() {
           tone="danger"
         />
       )}
+
+      {/* Guest reviews */}
+      <GuestReviewsPanel email={guest.email} />
     </div>
   );
 }

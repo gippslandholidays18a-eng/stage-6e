@@ -22,6 +22,7 @@ import OffersSettings from "@/pages/OffersSettings";
 import Tasks from "@/pages/Tasks";
 import Compliance from "@/pages/Compliance";
 import Inventory from "@/pages/Inventory";
+import Reviews from "@/pages/Reviews";
 
 function App() {
   return (
@@ -49,6 +50,7 @@ function App() {
                 <Route path="tasks" element={<Tasks />} />
                 <Route path="compliance" element={<Compliance />} />
                 <Route path="inventory" element={<Inventory />} />
+                <Route path="reviews" element={<Reviews />} />
 
                 {/* Admin-only nested routes */}
                 <Route element={<ProtectedRoute roles={["admin"]} />}>
